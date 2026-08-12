@@ -3,7 +3,8 @@ import { getTemplateDetail } from "@/lib/stats";
 import { getReviewCount } from "@/lib/queries";
 import { isTemplate, TEMPLATE_BY_ID } from "@/lib/taxonomy";
 import { Sidebar } from "@/app/components/Sidebar";
-import { FilterBar, parseFilter } from "@/app/components/FilterBar";
+import { FilterBar } from "@/app/components/FilterBar";
+import { parseFilter } from "@/lib/filter";
 import { Panel, Eyebrow } from "@/app/components/ui";
 import { Bars } from "@/app/components/Bars";
 

@@ -2,7 +2,8 @@ import Link from "next/link";
 import { getOverview } from "@/lib/stats";
 import { getReviewCount, getPostCount, getLastSyncRun } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
-import { FilterBar, parseFilter } from "@/app/components/FilterBar";
+import { FilterBar } from "@/app/components/FilterBar";
+import { parseFilter } from "@/lib/filter";
 import { Eyebrow } from "@/app/components/ui";
 
 export const dynamic = "force-dynamic";
