@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runSync } from "@/lib/ingest";
+import { runRuleClassification, runClaudeClassification } from "@/lib/classify";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +22,26 @@ async function handle(req: NextRequest) {
   const trigger = req.headers.get("x-vercel-cron") ? "cron" : "manual";
   try {
     const result = await runSync({ trigger, backfill, count });
-    return NextResponse.json(result, { status: result.ok ? 200 : 207 });
+
+    // Classify newly-ingested posts so they arrive pre-classified (spec). Rules
+    // first (free), then Claude for the handful the rules can't settle. Wrapped
+    // so a classification hiccup never fails the sync itself.
+    let ruleSettled = 0;
+    let claudeClassified = 0;
+    const classifyErrors: string[] = [];
+    try {
+      ruleSettled = (await runRuleClassification(false)).settled;
+      const c = await runClaudeClassification(200);
+      claudeClassified = c.classified;
+      classifyErrors.push(...c.errors);
+    } catch (err) {
+      classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
+    }
+
+    return NextResponse.json(
+      { ...result, classified: { ruleSettled, claudeClassified, errors: classifyErrors } },
+      { status: result.ok ? 200 : 207 },
+    );
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : String(err) },
