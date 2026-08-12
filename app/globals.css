@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/* Eco house style — palette + fonts exposed as Tailwind v4 theme tokens.
+   Colors become bg-eco-blue / text-eco-lightblue / border-eco-cyan etc.
+   Fonts become font-sans (Roobert) / font-mono (JetBrains Mono). */
+@theme {
+  --color-eco-blue: #1c53bd;
+  --color-eco-lightblue: #75c5ff;
+  --color-eco-black: #14192c;
+  --color-eco-grey: #e1eaf9;
+  --color-eco-cyan: #008992;
+  --color-eco-yellow: #f9eb70;
+
+  --font-sans: var(--font-roobert), system-ui, sans-serif;
+  --font-mono: var(--font-jbmono), ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* The signature move: app background is pure black; hierarchy via white opacity. */
+body {
+  background: #000;
+  color: #fff;
+}
+
+::selection {
+  background: #75c5ff;
+  color: #14192c;
+}
+
+/* Native select dropdowns readable in dark mode. */
+select option {
+  background: #0a0a0a;
+  color: #ffffff;
+}
+
+/* Thin scrollbars for editor/list panels. */
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
