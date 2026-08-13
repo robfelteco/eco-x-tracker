@@ -9,6 +9,7 @@ import {
   type PublicMetrics,
 } from "./twitter";
 import { runRuleClassification, runClaudeClassification } from "./classify";
+import { enrichByIds } from "./enrich";
 
 // Posts younger than this are eligible for a non_public_metrics attempt and for
 // daily re-snapshotting (metrics move fast early, then settle).
@@ -33,16 +34,25 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
   let added = 0;
   let updated = 0;
   for (const p of posts) {
+    // X native Article content arrives inline with the timeline — write it to the
+    // link_* card columns and stamp enriched_at so link-scraping skips it. Only
+    // set enriched_at when we actually have article content (never clobber an
+    // existing external-link card with nulls on a re-ingest).
+    const hasArticle = !!(p.link_title || p.link_image_url);
     const rows = await sql<{ inserted: boolean }>`
       INSERT INTO posts (
         id, url, created_at, text, urls, domains, mentions, hashtags,
         media_type, media_urls, preview_image_url,
-        is_reply, is_self_reply, is_quote, updated_at
+        is_reply, is_self_reply, is_quote,
+        link_title, link_description, link_image_url,
+        enriched_at, updated_at
       ) VALUES (
         ${p.id}, ${p.url}, ${p.created_at}, ${p.text},
         ${JSON.stringify(p.urls)}, ${p.domains}, ${p.mentions}, ${p.hashtags},
         ${p.mediaType}, ${JSON.stringify(p.media_urls)}, ${p.preview_image_url},
-        ${p.is_reply}, ${p.is_self_reply}, ${p.is_quote}, now()
+        ${p.is_reply}, ${p.is_self_reply}, ${p.is_quote},
+        ${p.link_title}, ${p.link_description}, ${p.link_image_url},
+        ${hasArticle ? new Date().toISOString() : null}, now()
       )
       ON CONFLICT (id) DO UPDATE SET
         text = EXCLUDED.text,
@@ -56,6 +66,10 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         is_reply = EXCLUDED.is_reply,
         is_self_reply = EXCLUDED.is_self_reply,
         is_quote = EXCLUDED.is_quote,
+        link_title = COALESCE(EXCLUDED.link_title, posts.link_title),
+        link_description = COALESCE(EXCLUDED.link_description, posts.link_description),
+        link_image_url = COALESCE(EXCLUDED.link_image_url, posts.link_image_url),
+        enriched_at = COALESCE(EXCLUDED.enriched_at, posts.enriched_at),
         updated_at = now()
       RETURNING (xmax = 0) AS inserted
     `;
@@ -130,6 +144,7 @@ export async function runSync(opts: {
   let postsUpdated = 0;
   let snapshots = 0;
   let classified = 0;
+  let enriched = 0;
   let ok = true;
 
   try {
@@ -150,6 +165,15 @@ export async function runSync(opts: {
       const up = await upsertPosts(fetched);
       postsAdded = up.added;
       postsUpdated = up.updated;
+
+      // Enrich outbound links (resolve t.co + scrape OG card) BEFORE classifying,
+      // so article posts arrive with readable title/description + a thumbnail.
+      // Self-filters to main posts that aren't enriched yet — cheap HTTP only.
+      try {
+        enriched = await enrichByIds(fetched.map((p) => p.id));
+      } catch (err) {
+        errors.push(`enrich: ${err instanceof Error ? err.message.slice(0, 150) : String(err)}`);
+      }
     }
 
     const fetchedIds = new Set(fetched.map((p) => p.id));
@@ -182,6 +206,7 @@ export async function runSync(opts: {
     const staleRows = await sql<{ id: string; created_at: string }>`
       SELECT id, created_at FROM posts
       WHERE created_at > now() - (${SNAPSHOT_TAPER_DAYS} || ' days')::interval
+        AND is_reply = false
     `;
     const stale = staleRows.filter((r) => !fetchedIds.has(r.id));
     for (let i = 0; i < stale.length; i += 100) {
@@ -222,6 +247,7 @@ export async function runSync(opts: {
   const estCost = Number((xReads * PER_READ_USD).toFixed(4));
   const summary =
     `${postsAdded} new · ${postsUpdated} updated · ${snapshots} snapshots` +
+    (enriched ? ` · ${enriched} enriched` : "") +
     (classified ? ` · ${classified} classified` : "") +
     ` · ${xReads} X reads (~$${estCost})` +
     (errors.length ? ` · ${errors.length} error(s)` : "");

@@ -11,12 +11,13 @@ interface ClassifiableRow extends RuleInput {
 const CLAUDE_IN_PER_MTOK = 3;
 const CLAUDE_OUT_PER_MTOK = 15;
 
-// Posts still needing a Stage-1 label: unclassified and not human-verified.
+// Posts still needing a Stage-1 label: unclassified, not human-verified, and a
+// main post (replies aren't tracked, so never spend a rule/Claude pass on them).
 async function fetchUnsettled(): Promise<ClassifiableRow[]> {
   return sql<ClassifiableRow>`
     SELECT id, text, domains, mentions, media_type, is_reply, is_self_reply, is_quote
     FROM posts
-    WHERE template IS NULL AND class_source IS DISTINCT FROM 'human'`;
+    WHERE template IS NULL AND class_source IS DISTINCT FROM 'human' AND is_reply = false`;
 }
 
 export interface RuleRunResult {
@@ -97,9 +98,9 @@ export interface ClaudeRunResult {
 export async function runClaudeClassification(limit = 600): Promise<ClaudeRunResult> {
   const rows = await sql<ClaudeRow>`
     SELECT id, text, domains, mentions, media_type, is_reply, is_self_reply, is_quote,
-           preview_image_url, media_urls
+           preview_image_url, media_urls, link_title, link_description, link_image_url
     FROM posts
-    WHERE template IS NULL AND class_source IS DISTINCT FROM 'human'
+    WHERE template IS NULL AND class_source IS DISTINCT FROM 'human' AND is_reply = false
     ORDER BY created_at DESC
     LIMIT ${limit}`;
 

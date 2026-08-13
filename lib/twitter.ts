@@ -181,6 +181,13 @@ export interface XPost {
   is_reply: boolean;
   is_self_reply: boolean;
   is_quote: boolean;
+  // X native long-form Article attached to this post, if any. The tweet text of
+  // an article post is usually just a t.co link — the real content is here, read
+  // straight from the API (tweet.fields=article) so we never have to scrape X's
+  // auth-gated article page. Fills the link_* columns at ingest.
+  link_title: string | null;
+  link_description: string | null;
+  link_image_url: string | null;
   // public_metrics returned inline with the timeline — used as the first
   // snapshot so we don't pay to re-read a post we just fetched.
   metrics: PublicMetrics;
@@ -220,6 +227,12 @@ interface RawTweet {
   referenced_tweets?: { type: string; id: string }[];
   attachments?: { media_keys?: string[] };
   note_tweet?: { text?: string };
+  article?: {
+    title?: string;
+    preview_text?: string; // short summary
+    plain_text?: string; // full body
+    cover_media?: string; // media_key → resolve via includes.media
+  };
   entities?: {
     urls?: { expanded_url?: string; url?: string }[];
     mentions?: { username: string }[];
@@ -298,6 +311,19 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
     })
     .filter((u) => u.expanded_url);
 
+  // X native Article attached to this post — read its title/summary/cover from
+  // the API rather than scraping X's auth-gated article page.
+  let link_title: string | null = null;
+  let link_description: string | null = null;
+  let link_image_url: string | null = null;
+  if (t.article) {
+    const cover = t.article.cover_media ? mediaMap.get(t.article.cover_media) : undefined;
+    link_title = t.article.title ? decodeEntities(t.article.title) : null;
+    const body = t.article.preview_text || t.article.plain_text || "";
+    link_description = body ? decodeEntities(body).slice(0, 600) : null;
+    link_image_url = cover?.url || cover?.preview_image_url || null;
+  }
+
   return {
     id: t.id,
     url: `https://x.com/i/status/${t.id}`,
@@ -313,6 +339,9 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
     is_reply,
     is_self_reply,
     is_quote,
+    link_title,
+    link_description,
+    link_image_url,
     metrics: {
       id: t.id,
       impressions: t.public_metrics?.impression_count ?? 0,
@@ -326,9 +355,9 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
 }
 
 const TWEET_FIELDS =
-  "created_at,public_metrics,referenced_tweets,text,entities,attachments,note_tweet,in_reply_to_user_id,author_id";
+  "created_at,public_metrics,referenced_tweets,text,entities,attachments,note_tweet,in_reply_to_user_id,author_id,article";
 const MEDIA_FIELDS = "type,url,preview_image_url,variants";
-const EXPANSIONS = "attachments.media_keys";
+const EXPANSIONS = "attachments.media_keys,article.cover_media";
 
 export interface FetchOpts {
   count?: number; // hard cap on posts returned
@@ -338,9 +367,12 @@ export interface FetchOpts {
 }
 
 /**
- * Fetch the account timeline. Excludes ONLY pure reposts (retweets); replies and
- * quotes are kept so we can mark self-replies (used for CTAs). The API reaches
- * ~3,200 most-recent posts; page with pagination_token up to maxPages.
+ * Fetch the account timeline. Excludes reposts (retweets) AND replies — we track
+ * only MAIN posts. Replies are redundant or off-topic: a thread is already
+ * represented by its first post (a self-reply just continues it), and replies to
+ * other accounts aren't our own standalone content. Quotes are kept (a quote is a
+ * standalone main post). The API reaches ~3,200 most-recent posts; page with
+ * pagination_token up to maxPages.
  */
 export async function fetchUserTweets(userId: string, opts: FetchOpts = {}): Promise<XPost[]> {
   const count = opts.count ?? 100;
@@ -352,7 +384,7 @@ export async function fetchUserTweets(userId: string, opts: FetchOpts = {}): Pro
   while (pages++ < maxPages) {
     const params: Record<string, string> = {
       max_results: "100",
-      exclude: "retweets", // keep replies (so self-replies survive); drop pure reposts
+      exclude: "retweets,replies", // main posts only — drop reposts AND all replies (self + others)
       "tweet.fields": TWEET_FIELDS,
       "media.fields": MEDIA_FIELDS,
       expansions: EXPANSIONS,
@@ -427,5 +459,41 @@ export async function fetchNonPublicMetrics(ids: string[]): Promise<NonPublicMet
     }));
   } catch {
     return []; // unavailable (too old / not permitted) — caller records the gap
+  }
+}
+
+export interface ArticleCard {
+  title: string | null;
+  description: string | null;
+  image: string | null;
+}
+
+/**
+ * Fetch the X native Article attached to a single post (by tweet id), reading
+ * title / summary / cover image straight from the API. Used to backfill article
+ * posts already in the DB (fresh ingests get the article inline with the
+ * timeline). Returns null if the post has no article or the read fails.
+ */
+export async function fetchArticleCard(tweetId: string): Promise<ArticleCard | null> {
+  try {
+    const data = await apiGet<{ data?: RawTweet; includes?: { media?: RawMedia[] } }>(`/tweets/${tweetId}`, {
+      "tweet.fields": "article",
+      expansions: "article.cover_media",
+      "media.fields": MEDIA_FIELDS,
+    });
+    addBilled(1);
+    const art = data.data?.article;
+    if (!art) return null;
+    const mediaMap = new Map<string, RawMedia>();
+    for (const m of data.includes?.media ?? []) mediaMap.set(m.media_key, m);
+    const cover = art.cover_media ? mediaMap.get(art.cover_media) : undefined;
+    const body = art.preview_text || art.plain_text || "";
+    return {
+      title: art.title ? decodeEntities(art.title) : null,
+      description: body ? decodeEntities(body).slice(0, 600) : null,
+      image: cover?.url || cover?.preview_image_url || null,
+    };
+  } catch {
+    return null;
   }
 }

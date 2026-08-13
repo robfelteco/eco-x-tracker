@@ -41,3 +41,38 @@ export function Tag({ children, tone = "neutral" }: { children: ReactNode; tone?
     <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-wider ${cls}`}>{children}</span>
   );
 }
+
+// Post thumbnail. Shows the post's visual (native photo, video poster, or the
+// resolved link/article card image) so it's recognizable without opening X.
+// Falls back to an empty placeholder tile when a post has no image at all.
+export function Thumb({
+  src,
+  href,
+  size = 44,
+}: {
+  src: string | null;
+  href?: string;
+  size?: number;
+}) {
+  const dim = { width: size, height: size };
+  const box =
+    "flex-none overflow-hidden rounded-md border border-white/10 bg-white/[0.03]";
+  if (!src) return <div className={box} style={dim} aria-hidden />;
+  const img = (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      style={dim}
+      className={`${box} object-cover transition hover:border-eco-lightblue/50`}
+    />
+  );
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" title="Open on X ↗">
+      {img}
+    </a>
+  ) : (
+    img
+  );
+}

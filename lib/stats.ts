@@ -43,6 +43,7 @@ export async function getOverview(filter: StatFilter): Promise<TemplateStat[]> {
         SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
       ) s ON true
       WHERE p.template IS NOT NULL
+        AND p.is_reply = false
         AND (${includeAll} OR p.amplified = ${wantAmplified})
         AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
     )
@@ -90,6 +91,11 @@ export interface TopPost {
   url: string;
   created_at: string;
   text: string;
+  template: Template | null;
+  media_type: string;
+  media_urls: string[];
+  preview_image_url: string | null;
+  link_image_url: string | null;
   impressions: number | null;
   likes: number | null;
   replies: number | null;
@@ -114,13 +120,15 @@ export async function getTemplateDetail(template: Template, filter: StatFilter):
   const { includeAll, wantAmplified } = ampFlags(filter.amplified);
 
   const topPosts = await sql<TopPost>`
-    SELECT p.id, p.url, p.created_at, p.text, p.amplified,
+    SELECT p.id, p.url, p.created_at, p.text, p.amplified, p.template,
+           p.media_type, p.media_urls, p.preview_image_url, p.link_image_url,
            s.impressions, s.likes, s.replies, s.bookmarks
     FROM posts p
     LEFT JOIN LATERAL (
       SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
     ) s ON true
     WHERE p.template = ${template}::content_template
+      AND p.is_reply = false
       AND (${includeAll} OR p.amplified = ${wantAmplified})
       AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
     ORDER BY s.impressions DESC NULLS LAST
@@ -131,6 +139,7 @@ export async function getTemplateDetail(template: Template, filter: StatFilter):
     SELECT to_char(date_trunc('week', created_at), 'YYYY-MM-DD') AS week, COUNT(*)::int AS count
     FROM posts
     WHERE template = ${template}::content_template
+      AND is_reply = false
       AND (${includeAll} OR amplified = ${wantAmplified})
       AND (${filter.since}::timestamptz IS NULL OR created_at >= ${filter.since}::timestamptz)
     GROUP BY 1 ORDER BY 1

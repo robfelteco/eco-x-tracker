@@ -5,8 +5,10 @@ import { isTemplate, TEMPLATE_BY_ID } from "@/lib/taxonomy";
 import { Sidebar } from "@/app/components/Sidebar";
 import { FilterBar } from "@/app/components/FilterBar";
 import { parseFilter } from "@/lib/filter";
-import { Panel, Eyebrow } from "@/app/components/ui";
+import { Panel, Eyebrow, Thumb } from "@/app/components/ui";
 import { Bars } from "@/app/components/Bars";
+import { ReorganizeSelect } from "@/app/components/ReorganizeSelect";
+import { pickThumb } from "@/lib/media";
 
 export const dynamic = "force-dynamic";
 
@@ -65,18 +67,20 @@ export default async function TemplatePage({
               <thead>
                 <tr className="bg-white/[0.03] text-left font-mono text-[10px] uppercase tracking-wider text-white/40">
                   <th className="px-3 py-2.5 font-medium">Date</th>
+                  <th className="px-3 py-2.5 font-medium">Media</th>
                   <th className="px-3 py-2.5 font-medium">Text</th>
                   <th className="px-3 py-2.5 text-right font-medium">Impr.</th>
                   <th className="px-3 py-2.5 text-right font-medium">Likes</th>
                   <th className="px-3 py-2.5 text-right font-medium">Replies</th>
                   <th className="px-3 py-2.5 text-right font-medium">Bookmarks</th>
                   <th className="px-3 py-2.5"></th>
+                  <th className="px-3 py-2.5 font-medium">Reorganize</th>
                 </tr>
               </thead>
               <tbody>
                 {topPosts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-8 text-center text-white/40">
+                    <td colSpan={9} className="px-3 py-8 text-center text-white/40">
                       No posts in this template/window.
                     </td>
                   </tr>
@@ -85,6 +89,9 @@ export default async function TemplatePage({
                     <tr key={p.id} className="border-t border-white/[0.07] transition hover:bg-white/[0.03]">
                       <td className="whitespace-nowrap px-3 py-2.5 font-mono text-[11px] text-white/50">
                         {new Date(p.created_at).toISOString().slice(0, 10)}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <Thumb src={pickThumb(p)} href={p.url} />
                       </td>
                       <td className="max-w-md px-3 py-2.5">
                         <span className="line-clamp-1 text-white/80">{p.text}</span>
@@ -97,6 +104,9 @@ export default async function TemplatePage({
                         <a href={p.url} target="_blank" rel="noreferrer" className="text-eco-lightblue hover:underline">
                           open
                         </a>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <ReorganizeSelect postId={p.id} current={p.template} />
                       </td>
                     </tr>
                   ))

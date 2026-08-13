@@ -57,8 +57,9 @@ CREATE TABLE IF NOT EXISTS posts (
   media_urls        jsonb NOT NULL DEFAULT '[]',    -- image/video urls
   preview_image_url text,                           -- video thumbnail (for multimodal classify)
 
-  -- Post shape. Pure reposts are excluded from ingestion entirely; self-replies
-  -- are KEPT and flagged (we use them for CTAs) but excluded from template stats.
+  -- Post shape. We track only MAIN posts: reposts and replies (self-replies AND
+  -- replies to others) are excluded at ingestion. The flags are retained on any
+  -- legacy rows and every read query filters is_reply = false as a backstop.
   is_reply          boolean NOT NULL DEFAULT false,
   is_self_reply     boolean NOT NULL DEFAULT false, -- reply where author == @eco
   is_quote          boolean NOT NULL DEFAULT false,
@@ -154,3 +155,19 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   errors         jsonb NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS sync_runs_started_idx ON sync_runs (started_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Migration 002 — link-preview enrichment (idempotent ADD COLUMN IF NOT EXISTS).
+-- Many posts carry their substance behind an outbound link — external articles
+-- and especially X's native long-form "Articles" (a t.co that opens an article
+-- whose body isn't in the tweet text). We resolve the link and scrape its OG
+-- card (title/description/image) so (a) the classifier can READ article posts
+-- instead of dumping them in review, and (b) every link/article post gets a
+-- thumbnail. See lib/enrich.ts. Populated best-effort during sync; null = not
+-- yet enriched or no usable card.
+-- ---------------------------------------------------------------------------
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_resolved_url text; -- t.co → final URL
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_title        text;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_description  text;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_image_url    text; -- OG/twitter card image
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS enriched_at       timestamptz;

@@ -20,6 +20,12 @@ function client(): Anthropic {
 export interface ClaudeInput extends RuleInput {
   preview_image_url: string | null;
   media_urls: string[];
+  // Link-preview enrichment (lib/enrich.ts). For posts whose substance lives
+  // behind a link — external articles and X native Articles especially — this is
+  // often the ONLY readable content and the only available image.
+  link_title: string | null;
+  link_description: string | null;
+  link_image_url: string | null;
 }
 
 export interface FewShot {
@@ -62,13 +68,14 @@ async function fetchImage(url: string): Promise<{ media_type: string; data: stri
   }
 }
 
-// Pick the best image to send: video/gif → preview thumbnail; photo → first media.
+// Pick the best image to send: video/gif → preview thumbnail; photo → first
+// media; otherwise the outbound link/article's OG card image.
 function imageUrlFor(post: ClaudeInput): string | null {
   if ((post.media_type === "video" || post.media_type === "animated_gif") && post.preview_image_url) {
     return post.preview_image_url;
   }
   if (post.media_type === "photo" && post.media_urls[0]) return post.media_urls[0];
-  return post.preview_image_url || post.media_urls[0] || null;
+  return post.preview_image_url || post.media_urls[0] || post.link_image_url || null;
 }
 
 function stripFences(s: string): string {
@@ -123,6 +130,14 @@ export async function classifyWithClaude(post: ClaudeInput, fewShots: FewShot[])
 
   const domains = post.domains?.length ? post.domains.join(", ") : "none";
   const mentions = post.mentions?.length ? post.mentions.map((m) => "@" + m).join(", ") : "none";
+  // When the tweet text is just a link, the resolved article card is the real
+  // content — surface it explicitly so the model reads the article, not the URL.
+  const linkBlock =
+    post.link_title || post.link_description
+      ? `\nlinked article (resolved from the post's outbound link):\n` +
+        `  title: ${post.link_title ?? "—"}\n` +
+        `  summary: ${(post.link_description ?? "—").slice(0, 600)}`
+      : "";
   content.push({
     type: "text",
     text:
@@ -131,7 +146,8 @@ export async function classifyWithClaude(post: ClaudeInput, fewShots: FewShot[])
       `outbound domains: ${domains}\n` +
       `mentions: ${mentions}\n` +
       `is_reply: ${post.is_reply} · is_self_reply: ${post.is_self_reply} · is_quote: ${post.is_quote}\n` +
-      `text:\n${post.text.slice(0, 1500)}`,
+      `text:\n${post.text.slice(0, 1500)}` +
+      linkBlock,
   });
 
   const msg = await client().messages.create({

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runRuleClassification, runClaudeClassification } from "@/lib/classify";
+import { enrichUnenriched } from "@/lib/enrich";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,8 +13,9 @@ function authorized(req: NextRequest): boolean {
   return !!secret && req.headers.get("authorization") === `Bearer ${secret}`;
 }
 
-// POST /api/classify?mode=rules  → run the Stage-1 deterministic pass.
-// (Stage-2 Claude pass is added next.)
+// POST /api/classify?mode=rules   → Stage-1 deterministic pass.
+// POST /api/classify?mode=claude   → Stage-2 Claude multimodal pass (?limit=N).
+// POST /api/classify?mode=enrich   → backfill link-preview cards (?limit=N).
 export async function POST(req: NextRequest) {
   if (!authorized(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const mode = req.nextUrl.searchParams.get("mode") ?? "rules";
@@ -27,6 +29,13 @@ export async function POST(req: NextRequest) {
       const limitParam = req.nextUrl.searchParams.get("limit");
       const limit = limitParam ? Math.max(1, Math.min(2000, Number(limitParam))) : undefined;
       const result = await runClaudeClassification(limit);
+      return NextResponse.json({ ok: true, mode, ...result });
+    }
+    if (mode === "enrich") {
+      // Backfill link-preview cards (resolve t.co + scrape OG) for stored posts.
+      const limitParam = req.nextUrl.searchParams.get("limit");
+      const limit = limitParam ? Math.max(1, Math.min(2000, Number(limitParam))) : 200;
+      const result = await enrichUnenriched(limit);
       return NextResponse.json({ ok: true, mode, ...result });
     }
     return NextResponse.json({ ok: false, error: `Unknown mode: ${mode}` }, { status: 400 });

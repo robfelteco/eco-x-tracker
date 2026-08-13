@@ -1,7 +1,9 @@
 import { getPostsWithLatest, getLastSyncRun, getPostCount, getReviewCount } from "@/lib/queries";
 import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
-import { Eyebrow, Tag } from "@/app/components/ui";
+import { Eyebrow, Tag, Thumb } from "@/app/components/ui";
 import { Sidebar } from "@/app/components/Sidebar";
+import { ReorganizeSelect } from "@/app/components/ReorganizeSelect";
+import { pickThumb } from "@/lib/media";
 
 export const dynamic = "force-dynamic";
 
@@ -53,8 +55,8 @@ export default async function PostsPage() {
             <thead>
               <tr className="bg-white/[0.03] text-left font-mono text-[10px] uppercase tracking-wider text-white/40">
                 <th className="px-3 py-2.5 font-medium">Date</th>
-                <th className="px-3 py-2.5 font-medium">Text</th>
                 <th className="px-3 py-2.5 font-medium">Media</th>
+                <th className="px-3 py-2.5 font-medium">Text</th>
                 <th className="px-3 py-2.5 font-medium">Flags</th>
                 <th className="px-3 py-2.5 font-medium">Template</th>
                 <th className="px-3 py-2.5 text-right font-medium">Impr.</th>
@@ -62,6 +64,7 @@ export default async function PostsPage() {
                 <th className="px-3 py-2.5 text-right font-medium">Replies</th>
                 <th className="px-3 py-2.5 text-right font-medium">Snaps</th>
                 <th className="px-3 py-2.5"></th>
+                <th className="px-3 py-2.5 font-medium">Reorganize</th>
               </tr>
             </thead>
             <tbody>
@@ -70,10 +73,17 @@ export default async function PostsPage() {
                   <td className="whitespace-nowrap px-3 py-2.5 font-mono text-[11px] text-white/45 tabular-nums">
                     {dateFmt(p.created_at)}
                   </td>
-                  <td className="max-w-md px-3 py-2.5">
-                    <span className="line-clamp-2 text-white/80">{p.text}</span>
+                  <td className="px-3 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <Thumb src={pickThumb(p)} href={p.url} />
+                      <span className="font-mono text-[10px] text-white/40">{p.media_type}</span>
+                    </div>
                   </td>
-                  <td className="px-3 py-2.5 text-white/55">{p.media_type}</td>
+                  <td className="max-w-md px-3 py-2.5">
+                    <span className="line-clamp-2 text-white/80">
+                      {p.text?.trim() || p.link_title || <span className="text-white/30">—</span>}
+                    </span>
+                  </td>
                   <td className="px-3 py-2.5">
                     <div className="flex flex-wrap gap-1">
                       {p.is_self_reply && <Tag tone="brand">self-reply</Tag>}
@@ -104,6 +114,9 @@ export default async function PostsPage() {
                     <a href={p.url} target="_blank" rel="noreferrer" className="text-eco-lightblue hover:underline">
                       open
                     </a>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <ReorganizeSelect postId={p.id} current={p.template} />
                   </td>
                 </tr>
               ))}

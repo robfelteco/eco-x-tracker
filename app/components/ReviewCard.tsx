@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { TEMPLATE_DEFS, TEMPLATE_BY_ID, type Template } from "@/lib/taxonomy";
 import type { ReviewRow } from "@/lib/queries";
 import { Tag } from "@/app/components/ui";
+import { pickThumb } from "@/lib/media";
 
 // One review item: the post, its media, Claude's guess + reasoning, and a
 // one-click button per template. Correcting marks it human-verified and adds it
@@ -14,8 +15,7 @@ export function ReviewCard({ post }: { post: ReviewRow }) {
   const [done, setDone] = useState<Template | null>(null);
   const router = useRouter();
 
-  const img =
-    (post.media_type === "photo" && post.media_urls[0]) || post.preview_image_url || post.media_urls[0] || null;
+  const img = pickThumb(post);
   const guess = post.template ? TEMPLATE_BY_ID[post.template]?.label ?? post.template : null;
 
   async function label(template: Template) {
@@ -57,7 +57,18 @@ export function ReviewCard({ post }: { post: ReviewRow }) {
               open ↗
             </a>
           </div>
-          <p className="line-clamp-3 text-sm text-white/80">{post.text}</p>
+          <p className="line-clamp-3 text-sm text-white/80">
+            {post.text?.trim() || <span className="text-white/30">(no tweet text — see linked article below)</span>}
+          </p>
+          {(post.link_title || post.link_description) && (
+            <div className="mt-1.5 rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-1.5">
+              <div className="font-mono text-[9px] uppercase tracking-wider text-white/30">linked article</div>
+              {post.link_title && <p className="mt-0.5 text-xs font-medium text-white/75">{post.link_title}</p>}
+              {post.link_description && (
+                <p className="mt-0.5 line-clamp-2 text-xs text-white/45">{post.link_description}</p>
+              )}
+            </div>
+          )}
           <p className="mt-1.5 text-xs text-white/45">
             {guess ? (
               <>
