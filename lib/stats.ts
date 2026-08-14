@@ -96,6 +96,7 @@ export interface TopPost {
   media_urls: string[];
   preview_image_url: string | null;
   link_image_url: string | null;
+  quoted_image_url: string | null;
   impressions: number | null;
   likes: number | null;
   replies: number | null;
@@ -121,7 +122,7 @@ export async function getTemplateDetail(template: Template, filter: StatFilter):
 
   const topPosts = await sql<TopPost>`
     SELECT p.id, p.url, p.created_at, p.text, p.amplified, p.template,
-           p.media_type, p.media_urls, p.preview_image_url, p.link_image_url,
+           p.media_type, p.media_urls, p.preview_image_url, p.link_image_url, p.quoted_image_url,
            s.impressions, s.likes, s.replies, s.bookmarks
     FROM posts p
     LEFT JOIN LATERAL (

@@ -1,5 +1,5 @@
 import { sql } from "./db";
-import { fetchArticleCard } from "./twitter";
+import { fetchArticleCard, fetchQuotedImage } from "./twitter";
 
 /**
  * Link-preview enrichment.
@@ -209,6 +209,49 @@ export async function enrichUnenriched(limit = 200): Promise<{ scanned: number; 
     LIMIT ${limit}`;
   const enriched = await runEnrich(rows);
   return { scanned: rows.length, enriched };
+}
+
+// Extract a quoted tweet's id from a post's outbound links (the quote permalink,
+// x.com/<user>/status/<id>). We don't store the quoted id separately — the
+// permalink in `urls` carries it.
+function quotedTweetIdFromUrls(urls: { url?: string; expanded_url?: string }[] | null | undefined): string | null {
+  for (const u of urls ?? []) {
+    const m = /(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/i.exec(u.expanded_url || u.url || "");
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
+ * Fill quoted_image_url for QUOTE posts the timeline expansion couldn't resolve
+ * for free — chiefly quotes of X native Articles, whose cover only resolves on a
+ * direct fetch of the quoted tweet (see fetchQuotedImage). One billed read per
+ * such post; scoped to the given ids and skipped once a quote already has an
+ * image. `scanAll` backfills every unresolved quote post instead.
+ */
+export async function enrichQuotedImages(ids: string[], scanAll = false, limit = 200): Promise<number> {
+  const rows = scanAll
+    ? await sql<EnrichRow>`
+        SELECT id, urls FROM posts
+        WHERE is_reply = false AND is_quote = true AND quoted_image_url IS NULL
+        ORDER BY created_at DESC LIMIT ${limit}`
+    : ids.length
+      ? await sql<EnrichRow>`
+          SELECT id, urls FROM posts
+          WHERE id = ANY(${ids}) AND is_reply = false AND is_quote = true AND quoted_image_url IS NULL`
+      : [];
+  const targets = rows
+    .map((r) => ({ id: r.id, qid: quotedTweetIdFromUrls(r.urls) }))
+    .filter((t): t is { id: string; qid: string } => !!t.qid);
+  let n = 0;
+  await pool(targets, 4, async ({ id, qid }) => {
+    const img = await fetchQuotedImage(qid);
+    if (img) {
+      await sql`UPDATE posts SET quoted_image_url = ${img}, updated_at = now() WHERE id = ${id}`;
+      n++;
+    }
+  });
+  return n;
 }
 
 async function runEnrich(rows: EnrichRow[]): Promise<number> {

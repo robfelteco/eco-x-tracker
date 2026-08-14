@@ -38,7 +38,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 ))}
               </nav>
             </div>
-            <span className="font-mono text-[10px] uppercase tracking-wider text-white/30">Internal · @eco</span>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/eco-logo-white.svg" alt="Eco" className="h-5 w-auto opacity-90" />
           </div>
         </header>
         {children}

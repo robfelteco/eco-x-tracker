@@ -171,3 +171,12 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_title        text;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_description  text;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS link_image_url    text; -- OG/twitter card image
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS enriched_at       timestamptz;
+
+-- ---------------------------------------------------------------------------
+-- Migration 003 — quoted-tweet thumbnail. For a QUOTE post the visual the reader
+-- sees is the quoted tweet's own image (native photo/video poster, or the cover
+-- of a quoted X native Article). The quoting post rarely repeats it, so we pull
+-- it from the referenced-tweet expansion at ingest (see lib/twitter.ts) and use
+-- it as the row thumbnail. null = not a quote, or the quote has no visual.
+-- ---------------------------------------------------------------------------
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_image_url  text;

@@ -8,6 +8,7 @@ export interface ThumbSource {
   media_urls?: string[] | null;
   preview_image_url?: string | null;
   link_image_url?: string | null;
+  quoted_image_url?: string | null;
 }
 
 // media_urls can also contain the mp4 rendition for videos — never a thumbnail.
@@ -21,6 +22,7 @@ export function pickThumb(p: ThumbSource): string | null {
   if ((p.media_type === "video" || p.media_type === "animated_gif") && p.preview_image_url) {
     return p.preview_image_url;
   }
-  // Fallbacks: any native image, the video poster, then the link/article card.
-  return photo || p.preview_image_url || p.link_image_url || null;
+  // Fallbacks: any native image, the video poster, the quoted tweet's image
+  // (for quote posts), then the link/article card.
+  return photo || p.preview_image_url || p.quoted_image_url || p.link_image_url || null;
 }

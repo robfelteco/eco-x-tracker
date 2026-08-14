@@ -18,6 +18,7 @@ export interface PostRow {
   media_urls: string[];
   preview_image_url: string | null;
   link_image_url: string | null;
+  quoted_image_url: string | null;
   link_title: string | null;
   impressions: number | null;
   likes: number | null;
@@ -37,7 +38,7 @@ export async function getPostsWithLatest(limit = 200): Promise<PostRow[]> {
       p.id, p.url, p.created_at, p.text, p.media_type,
       p.is_reply, p.is_self_reply, p.is_quote, p.amplified,
       p.template, p.confidence, p.class_source,
-      p.media_urls, p.preview_image_url, p.link_image_url, p.link_title,
+      p.media_urls, p.preview_image_url, p.link_image_url, p.quoted_image_url, p.link_title,
       s.impressions, s.likes, s.replies, s.retweets, s.bookmarks,
       COALESCE(sc.n, 0) AS snapshot_count
     FROM posts p
@@ -91,6 +92,7 @@ export interface ReviewRow {
   preview_image_url: string | null;
   media_urls: string[];
   link_image_url: string | null;
+  quoted_image_url: string | null;
   link_title: string | null;
   link_description: string | null;
   template: Template | null;
@@ -105,7 +107,7 @@ export interface ReviewRow {
 export async function getReviewQueue(limit = 100): Promise<ReviewRow[]> {
   const rows = await sql<ReviewRow>`
     SELECT id, url, created_at, text, media_type, preview_image_url, media_urls,
-           link_image_url, link_title, link_description,
+           link_image_url, quoted_image_url, link_title, link_description,
            template, confidence, reasoning, class_source
     FROM posts
     WHERE is_reply = false

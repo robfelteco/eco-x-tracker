@@ -188,6 +188,11 @@ export interface XPost {
   link_title: string | null;
   link_description: string | null;
   link_image_url: string | null;
+  // For a QUOTE post, the visual the reader sees is the quoted tweet's own
+  // image — a native photo/video poster, or (when the quoted tweet is itself an
+  // X native Article) its cover image. The quoting post rarely repeats it, so we
+  // pull it from the referenced-tweet expansion and use it as the thumbnail.
+  quoted_image_url: string | null;
   // public_metrics returned inline with the timeline — used as the first
   // snapshot so we don't pay to re-read a post we just fetched.
   metrics: PublicMetrics;
@@ -226,18 +231,20 @@ interface RawTweet {
   non_public_metrics?: { url_link_clicks?: number; user_profile_clicks?: number };
   referenced_tweets?: { type: string; id: string }[];
   attachments?: { media_keys?: string[] };
-  note_tweet?: { text?: string };
+  note_tweet?: { text?: string; entities?: RawEntities };
   article?: {
     title?: string;
     preview_text?: string; // short summary
     plain_text?: string; // full body
     cover_media?: string; // media_key → resolve via includes.media
   };
-  entities?: {
-    urls?: { expanded_url?: string; url?: string }[];
-    mentions?: { username: string }[];
-    hashtags?: { tag: string }[];
-  };
+  entities?: RawEntities;
+}
+
+interface RawEntities {
+  urls?: { expanded_url?: string; url?: string }[];
+  mentions?: { username: string }[];
+  hashtags?: { tag: string }[];
 }
 
 interface RawMedia {
@@ -273,16 +280,63 @@ export async function resolveHandle(handle: string): Promise<{ id: string; usern
   return resolved;
 }
 
-function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: string): XPost {
+// Best image on a single tweet: a native photo, else a video/GIF poster, else
+// (when the tweet is an X native Article) its cover image. Used both for the
+// main post and for the quoted tweet behind a quote post.
+function imageOnTweet(t: RawTweet, mediaMap: Map<string, RawMedia>): string | null {
+  for (const k of t.attachments?.media_keys ?? []) {
+    const m = mediaMap.get(k);
+    if (!m) continue;
+    if (m.type === "photo" && m.url) return m.url;
+    if ((m.type === "video" || m.type === "animated_gif") && m.preview_image_url) return m.preview_image_url;
+  }
+  if (t.article?.cover_media) {
+    const cover = mediaMap.get(t.article.cover_media);
+    if (cover?.url || cover?.preview_image_url) return cover.url || cover.preview_image_url || null;
+  }
+  return null;
+}
+
+// Long-form posts (note_tweet) carry their FULL entities in note_tweet.entities,
+// while the top-level entities only cover the truncated 280-char preview — so a
+// link past the cutoff (the classic "…\n\nhttps://t.co/…" article/doc link) is
+// absent from t.entities. Neither set is a strict superset (the quoted-tweet
+// t.co often sits only in the top-level set), so we MERGE both and dedupe.
+function mergedEntities(t: RawTweet): Required<RawEntities> {
+  const a = t.entities ?? {};
+  const b = t.note_tweet?.entities ?? {};
+  const urlKey = (u: { expanded_url?: string; url?: string }) => u.expanded_url || u.url || "";
+  const urls = [...(a.urls ?? []), ...(b.urls ?? [])];
+  const seenUrl = new Set<string>();
+  const dedupUrls = urls.filter((u) => {
+    const k = urlKey(u);
+    if (!k || seenUrl.has(k)) return false;
+    seenUrl.add(k);
+    return true;
+  });
+  return {
+    urls: dedupUrls,
+    mentions: [...(a.mentions ?? []), ...(b.mentions ?? [])],
+    hashtags: [...(a.hashtags ?? []), ...(b.hashtags ?? [])],
+  };
+}
+
+function mapRawToPost(
+  t: RawTweet,
+  mediaMap: Map<string, RawMedia>,
+  quotedMap: Map<string, RawTweet>,
+  selfUserId: string,
+): XPost {
   const keys = t.attachments?.media_keys ?? [];
   const media = keys.map((k) => mediaMap.get(k)).filter(Boolean) as RawMedia[];
   const types = media.map((m) => m.type);
+  const ent = mergedEntities(t);
 
   let mediaType: MediaType = "text";
   if (types.includes("video")) mediaType = "video";
   else if (types.includes("animated_gif")) mediaType = "animated_gif";
   else if (types.includes("photo")) mediaType = "photo";
-  else if (t.entities?.urls?.length) mediaType = "link-card";
+  else if (ent.urls.length) mediaType = "link-card";
 
   const media_urls: string[] = [];
   let preview_image_url: string | null = null;
@@ -304,7 +358,14 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
   const is_reply = refs.some((r) => r.type === "replied_to") || !!t.in_reply_to_user_id;
   const is_self_reply = is_reply && t.in_reply_to_user_id === selfUserId;
 
-  const urls = (t.entities?.urls ?? [])
+  // Thumbnail for a quote post: the quoted tweet's own image (native media or,
+  // if it's an X native Article, its cover). Resolved from the referenced-tweet
+  // expansion; null when the quote has no visual of its own.
+  const quotedRef = refs.find((r) => r.type === "quoted");
+  const quotedTweet = quotedRef ? quotedMap.get(quotedRef.id) : undefined;
+  const quoted_image_url = quotedTweet ? imageOnTweet(quotedTweet, mediaMap) : null;
+
+  const urls = ent.urls
     .map((u) => {
       const expanded = u.expanded_url || u.url || "";
       return { url: u.url || expanded, expanded_url: expanded, domain: domainOf(expanded) };
@@ -331,8 +392,8 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
     text: decodeEntities(t.note_tweet?.text || t.text),
     urls,
     domains: [...new Set(urls.map((u) => u.domain).filter(Boolean))],
-    mentions: (t.entities?.mentions ?? []).map((m) => m.username.toLowerCase()),
-    hashtags: (t.entities?.hashtags ?? []).map((h) => h.tag),
+    mentions: [...new Set(ent.mentions.map((m) => m.username.toLowerCase()))],
+    hashtags: [...new Set(ent.hashtags.map((h) => h.tag))],
     mediaType,
     media_urls: [...new Set(media_urls)],
     preview_image_url,
@@ -342,6 +403,7 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
     link_title,
     link_description,
     link_image_url,
+    quoted_image_url,
     metrics: {
       id: t.id,
       impressions: t.public_metrics?.impression_count ?? 0,
@@ -357,7 +419,10 @@ function mapRawToPost(t: RawTweet, mediaMap: Map<string, RawMedia>, selfUserId: 
 const TWEET_FIELDS =
   "created_at,public_metrics,referenced_tweets,text,entities,attachments,note_tweet,in_reply_to_user_id,author_id,article";
 const MEDIA_FIELDS = "type,url,preview_image_url,variants";
-const EXPANSIONS = "attachments.media_keys,article.cover_media";
+// Also expand the quoted tweet (referenced_tweets.id) and ITS media/article
+// cover, so a quote post can borrow the quoted tweet's image as its thumbnail.
+const EXPANSIONS =
+  "attachments.media_keys,article.cover_media,referenced_tweets.id,referenced_tweets.id.attachments.media_keys,referenced_tweets.id.article.cover_media";
 
 export interface FetchOpts {
   count?: number; // hard cap on posts returned
@@ -395,19 +460,22 @@ export async function fetchUserTweets(userId: string, opts: FetchOpts = {}): Pro
 
     const data = await apiGet<{
       data?: RawTweet[];
-      includes?: { media?: RawMedia[] };
+      includes?: { media?: RawMedia[]; tweets?: RawTweet[] };
       meta?: { next_token?: string };
     }>(`/users/${userId}/tweets`, params);
 
     const tweets = data.data || [];
     if (!tweets.length) break;
-    addBilled(tweets.length); // X bills per post returned
+    addBilled(tweets.length); // X bills per post in `data`; expanded includes are free
 
     const mediaMap = new Map<string, RawMedia>();
     for (const m of data.includes?.media ?? []) mediaMap.set(m.media_key, m);
+    // Quoted tweets arrive as expansions in includes.tweets (not billed).
+    const quotedMap = new Map<string, RawTweet>();
+    for (const qt of data.includes?.tweets ?? []) quotedMap.set(qt.id, qt);
 
     for (const t of tweets) {
-      results.push(mapRawToPost(t, mediaMap, userId));
+      results.push(mapRawToPost(t, mediaMap, quotedMap, userId));
       if (results.length >= count) return results;
     }
 
@@ -459,6 +527,32 @@ export async function fetchNonPublicMetrics(ids: string[]): Promise<NonPublicMet
     }));
   } catch {
     return []; // unavailable (too old / not permitted) — caller records the gap
+  }
+}
+
+/**
+ * Resolve a QUOTED tweet's image by fetching it directly (one billed read).
+ * The timeline's nested referenced_tweets expansion resolves a quoted tweet's
+ * NATIVE media (photo/video poster) for free — but NOT the cover image of a
+ * quoted X native Article: the API returns the cover's media_key without the
+ * media object. Fetching the quoted tweet on its own DOES resolve it into
+ * includes.media. Used as a fallback for quote-of-article posts. Returns null
+ * if the quote has no image of its own or the read fails.
+ */
+export async function fetchQuotedImage(quotedTweetId: string): Promise<string | null> {
+  try {
+    const data = await apiGet<{ data?: RawTweet; includes?: { media?: RawMedia[] } }>(`/tweets/${quotedTweetId}`, {
+      "tweet.fields": "attachments,article",
+      expansions: "attachments.media_keys,article.cover_media",
+      "media.fields": MEDIA_FIELDS,
+    });
+    addBilled(1);
+    if (!data.data) return null;
+    const mediaMap = new Map<string, RawMedia>();
+    for (const m of data.includes?.media ?? []) mediaMap.set(m.media_key, m);
+    return imageOnTweet(data.data, mediaMap);
+  } catch {
+    return null;
   }
 }
 
