@@ -112,7 +112,7 @@ export interface WeeklyPoint {
 
 export interface TemplateDetail {
   stat: TemplateStat;
-  topPosts: TopPost[];
+  posts: TopPost[];
   weekly: WeeklyPoint[];
 }
 
@@ -288,7 +288,10 @@ export async function getTemplateDetail(template: Template, filter: StatFilter):
   const stat = overview.find((s) => s.template === template)!;
   const { includeAll, wantAmplified } = ampFlags(filter.amplified);
 
-  const topPosts = await sql<TopPost>`
+  // Every post in this template/window (default order: most impressions first).
+  // The client table lets the operator re-sort by date or engagement without a
+  // round-trip, so we return the full set rather than a top-N.
+  const posts = await sql<TopPost>`
     SELECT p.id, p.url, p.created_at, p.text, p.amplified, p.template,
            p.media_type, p.media_urls, p.preview_image_url, p.link_image_url, p.quoted_image_url,
            s.impressions, s.likes, s.replies, s.bookmarks
@@ -301,7 +304,6 @@ export async function getTemplateDetail(template: Template, filter: StatFilter):
       AND (${includeAll} OR p.amplified = ${wantAmplified})
       AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
     ORDER BY s.impressions DESC NULLS LAST
-    LIMIT 10
   `;
 
   const weekly = await sql<WeeklyPoint>`
@@ -314,5 +316,5 @@ export async function getTemplateDetail(template: Template, filter: StatFilter):
     GROUP BY 1 ORDER BY 1
   `;
 
-  return { stat, topPosts, weekly };
+  return { stat, posts, weekly };
 }

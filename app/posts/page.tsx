@@ -3,6 +3,7 @@ import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
 import { Eyebrow, Tag, Thumb } from "@/app/components/ui";
 import { Sidebar } from "@/app/components/Sidebar";
 import { ReorganizeSelect } from "@/app/components/ReorganizeSelect";
+import { ExpandableText } from "@/app/components/ExpandableText";
 import { pickThumb } from "@/lib/media";
 
 export const dynamic = "force-dynamic";
@@ -63,7 +64,6 @@ export default async function PostsPage() {
                 <th className="px-3 py-2.5 text-right font-medium">Likes</th>
                 <th className="px-3 py-2.5 text-right font-medium">Replies</th>
                 <th className="px-3 py-2.5 text-right font-medium">Snaps</th>
-                <th className="px-3 py-2.5"></th>
                 <th className="px-3 py-2.5 font-medium">Reorganize</th>
               </tr>
             </thead>
@@ -79,10 +79,8 @@ export default async function PostsPage() {
                       <span className="font-mono text-[10px] text-white/40">{p.media_type}</span>
                     </div>
                   </td>
-                  <td className="max-w-md px-3 py-2.5">
-                    <span className="line-clamp-2 text-white/80">
-                      {p.text?.trim() || p.link_title || <span className="text-white/30">—</span>}
-                    </span>
+                  <td className="max-w-md px-3 py-2.5 align-top">
+                    <ExpandableText text={p.text?.trim() || p.link_title} lines={2} />
                   </td>
                   <td className="px-3 py-2.5">
                     <div className="flex flex-wrap gap-1">
@@ -109,11 +107,6 @@ export default async function PostsPage() {
                   <td className="px-3 py-2.5 text-right tabular-nums text-white/70">{fmt(p.replies)}</td>
                   <td className="px-3 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/35">
                     {p.snapshot_count}
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <a href={p.url} target="_blank" rel="noreferrer" className="text-eco-lightblue hover:underline">
-                      open
-                    </a>
                   </td>
                   <td className="px-3 py-2.5">
                     <ReorganizeSelect postId={p.id} current={p.template} />

@@ -5,10 +5,9 @@ import { isTemplate, TEMPLATE_BY_ID } from "@/lib/taxonomy";
 import { Sidebar } from "@/app/components/Sidebar";
 import { FilterBar } from "@/app/components/FilterBar";
 import { parseFilter } from "@/lib/filter";
-import { Panel, Eyebrow, Thumb } from "@/app/components/ui";
+import { Panel, Eyebrow } from "@/app/components/ui";
 import { Bars } from "@/app/components/Bars";
-import { ReorganizeSelect } from "@/app/components/ReorganizeSelect";
-import { pickThumb } from "@/lib/media";
+import { TemplatePostsTable } from "@/app/components/TemplatePostsTable";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +25,7 @@ export default async function TemplatePage({
   const { template } = await params;
   if (!isTemplate(template)) notFound();
   const filter = parseFilter(await searchParams);
-  const [{ stat, topPosts, weekly }, reviewCount] = await Promise.all([
+  const [{ stat, posts, weekly }, reviewCount] = await Promise.all([
     getTemplateDetail(template, filter),
     getReviewCount(),
   ]);
@@ -61,59 +60,7 @@ export default async function TemplatePage({
         </div>
 
         <div className="mt-6">
-          <Eyebrow>Top posts by impressions</Eyebrow>
-          <div className="mt-3 overflow-x-auto rounded-2xl border border-white/10 scroll-thin">
-            <table className="w-full min-w-[720px] border-collapse text-sm">
-              <thead>
-                <tr className="bg-white/[0.03] text-left font-mono text-[10px] uppercase tracking-wider text-white/40">
-                  <th className="px-3 py-2.5 font-medium">Date</th>
-                  <th className="px-3 py-2.5 font-medium">Media</th>
-                  <th className="px-3 py-2.5 font-medium">Text</th>
-                  <th className="px-3 py-2.5 text-right font-medium">Impr.</th>
-                  <th className="px-3 py-2.5 text-right font-medium">Likes</th>
-                  <th className="px-3 py-2.5 text-right font-medium">Replies</th>
-                  <th className="px-3 py-2.5 text-right font-medium">Bookmarks</th>
-                  <th className="px-3 py-2.5"></th>
-                  <th className="px-3 py-2.5 font-medium">Reorganize</th>
-                </tr>
-              </thead>
-              <tbody>
-                {topPosts.length === 0 ? (
-                  <tr>
-                    <td colSpan={9} className="px-3 py-8 text-center text-white/40">
-                      No posts in this template/window.
-                    </td>
-                  </tr>
-                ) : (
-                  topPosts.map((p) => (
-                    <tr key={p.id} className="border-t border-white/[0.07] transition hover:bg-white/[0.03]">
-                      <td className="whitespace-nowrap px-3 py-2.5 font-mono text-[11px] text-white/50">
-                        {new Date(p.created_at).toISOString().slice(0, 10)}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <Thumb src={pickThumb(p)} href={p.url} />
-                      </td>
-                      <td className="max-w-md px-3 py-2.5">
-                        <span className="line-clamp-1 text-white/80">{p.text}</span>
-                      </td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-white/80">{fmt(p.impressions)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-white/60">{fmt(p.likes)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-white/60">{fmt(p.replies)}</td>
-                      <td className="px-3 py-2.5 text-right tabular-nums text-white/60">{fmt(p.bookmarks)}</td>
-                      <td className="px-3 py-2.5">
-                        <a href={p.url} target="_blank" rel="noreferrer" className="text-eco-lightblue hover:underline">
-                          open
-                        </a>
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <ReorganizeSelect postId={p.id} current={p.template} />
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <TemplatePostsTable posts={posts} />
         </div>
       </main>
     </div>
