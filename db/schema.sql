@@ -180,3 +180,17 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS enriched_at       timestamptz;
 -- it as the row thumbnail. null = not a quote, or the quote has no visual.
 -- ---------------------------------------------------------------------------
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_image_url  text;
+
+-- ---------------------------------------------------------------------------
+-- Migration 004 — chain / entity sub-dimensions. A post's template (its content
+-- pillar) is only one axis; the Insights tab also needs to know WHICH chain and
+-- WHICH company/partner a post highlights, so it can answer "you just did a
+-- Solana data-motion visual — the next best chain is Arbitrum." Extracted
+-- deterministically from @-mentions + domains + distinctive text tokens at
+-- ingest (see lib/dimensions.ts). Empty array = none detected. Multi-valued: a
+-- post can highlight several chains/partners and counts toward each.
+-- ---------------------------------------------------------------------------
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS chains   text[] NOT NULL DEFAULT '{}';
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS entities text[] NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS posts_chains_idx   ON posts USING gin (chains);
+CREATE INDEX IF NOT EXISTS posts_entities_idx ON posts USING gin (entities);

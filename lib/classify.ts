@@ -1,6 +1,6 @@
 import { sql } from "./db";
 import { classifyByRules, type RuleInput } from "./classifyRules";
-import { classifyWithClaude, type ClaudeInput, type FewShot } from "./classifyClaude";
+import { classifyWithClaude, encodeVisualFewShots, type ClaudeInput, type FewShot, type VisualFewShot } from "./classifyClaude";
 import { REVIEW_THRESHOLD, type Template } from "./taxonomy";
 
 interface ClassifiableRow extends RuleInput {
@@ -15,7 +15,11 @@ const CLAUDE_OUT_PER_MTOK = 15;
 // main post (replies aren't tracked, so never spend a rule/Claude pass on them).
 async function fetchUnsettled(): Promise<ClassifiableRow[]> {
   return sql<ClassifiableRow>`
-    SELECT id, text, domains, mentions, media_type, is_reply, is_self_reply, is_quote
+    SELECT id, text, domains, mentions, media_type, is_reply, is_self_reply, is_quote,
+           COALESCE(ARRAY(SELECT lower(u->>'expanded_url') FROM jsonb_array_elements(posts.urls) u
+                          WHERE u->>'expanded_url' IS NOT NULL), '{}')
+             || CASE WHEN link_resolved_url IS NOT NULL THEN ARRAY[lower(link_resolved_url)] ELSE '{}'::text[] END
+             AS urls
     FROM posts
     WHERE template IS NULL AND class_source IS DISTINCT FROM 'human' AND is_reply = false`;
 }
@@ -79,6 +83,46 @@ async function getFewShots(limit = 10): Promise<FewShot[]> {
   return rows.map((r) => ({ text: r.text, template: r.template }));
 }
 
+// Templates whose identity is carried by the IMAGE, not the text — the ones
+// Claude confuses without a visual anchor (Jay's quote-card crossover problem).
+const VISUAL_TEMPLATES: Template[] = [
+  "quote_card",
+  "data_motion_visual",
+  "integration_announcement",
+  "product_post",
+  "short_form_video_eco",
+  "dev_doc_post",
+];
+
+// One canonical exemplar IMAGE per visual template, drawn from our own corpus:
+// prefer a human-verified post, else the highest-confidence one, that actually
+// has an image. Fetched+encoded once per run (see encodeVisualFewShots) and
+// reused for every classification, so the cost is a handful of images total.
+async function getVisualFewShots(): Promise<VisualFewShot[]> {
+  const rows = await sql<{
+    template: Template;
+    media_type: string;
+    preview_image_url: string | null;
+    media_urls: string[];
+    link_image_url: string | null;
+    quoted_image_url: string | null;
+  }>`
+    SELECT DISTINCT ON (template)
+      template, media_type, preview_image_url, media_urls, link_image_url, quoted_image_url
+    FROM posts
+    WHERE template = ANY(${VISUAL_TEMPLATES}::content_template[])
+      AND is_reply = false
+      AND (preview_image_url IS NOT NULL
+           OR jsonb_array_length(media_urls) > 0
+           OR link_image_url IS NOT NULL
+           OR quoted_image_url IS NOT NULL)
+    ORDER BY template,
+      (class_source = 'human') DESC NULLS LAST,
+      confidence DESC NULLS LAST,
+      created_at DESC`;
+  return encodeVisualFewShots(rows);
+}
+
 interface ClaudeRow extends ClaudeInput {
   id: string;
 }
@@ -98,13 +142,21 @@ export interface ClaudeRunResult {
 export async function runClaudeClassification(limit = 600): Promise<ClaudeRunResult> {
   const rows = await sql<ClaudeRow>`
     SELECT id, text, domains, mentions, media_type, is_reply, is_self_reply, is_quote,
+           COALESCE(ARRAY(SELECT lower(u->>'expanded_url') FROM jsonb_array_elements(posts.urls) u
+                          WHERE u->>'expanded_url' IS NOT NULL), '{}')
+             || CASE WHEN link_resolved_url IS NOT NULL THEN ARRAY[lower(link_resolved_url)] ELSE '{}'::text[] END
+             AS urls,
            preview_image_url, media_urls, link_title, link_description, link_image_url
     FROM posts
     WHERE template IS NULL AND class_source IS DISTINCT FROM 'human' AND is_reply = false
     ORDER BY created_at DESC
     LIMIT ${limit}`;
 
-  const fewShots = await getFewShots();
+  // Fetch text few-shots and the VISUAL exemplars once, then reuse across every
+  // post in this run (Jay's "drag 5 quote cards in" — but generalized to one
+  // canonical image per visually-distinct template, pulled from our own
+  // human-labeled/high-confidence posts).
+  const [fewShots, visualFewShots] = await Promise.all([getFewShots(), getVisualFewShots()]);
   const byTemplate: Record<string, number> = {};
   const errors: string[] = [];
   let classified = 0;
@@ -113,7 +165,7 @@ export async function runClaudeClassification(limit = 600): Promise<ClaudeRunRes
 
   for (const r of rows) {
     try {
-      const res = await classifyWithClaude(r, fewShots);
+      const res = await classifyWithClaude(r, fewShots, visualFewShots);
       if (res.usage) {
         costUsd += (res.usage.input * CLAUDE_IN_PER_MTOK + res.usage.output * CLAUDE_OUT_PER_MTOK) / 1_000_000;
       }

@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { taxonomyPromptBlock, isTemplate, type Template } from "./taxonomy";
 import type { RuleInput } from "./classifyRules";
+import { pickThumb, type ThumbSource } from "./media";
 
 // Stage-2 classification via the Anthropic API (claude-sonnet-4-6, multimodal).
 // Model is per the project brief; it's a current model with vision + strong
@@ -31,6 +32,32 @@ export interface ClaudeInput extends RuleInput {
 export interface FewShot {
   text: string;
   template: Template;
+}
+
+// A pre-encoded reference image for one template, shown to the model as a
+// visual anchor. Built once per run from our own corpus (see
+// encodeVisualFewShots) and reused across every classification call.
+export interface VisualFewShot {
+  template: Template;
+  source: { type: "base64"; media_type: string; data: string };
+}
+
+// Pick + download + base64-encode one exemplar image per row. Rows should
+// already be ordered "best exemplar first" per template; `cap` bounds total
+// images (and therefore added tokens/latency) per run.
+export async function encodeVisualFewShots(
+  rows: (ThumbSource & { template: Template })[],
+  cap = 6,
+): Promise<VisualFewShot[]> {
+  const out: VisualFewShot[] = [];
+  for (const r of rows) {
+    if (out.length >= cap) break;
+    const url = pickThumb(r);
+    if (!url) continue;
+    const img = await fetchImage(url);
+    if (img) out.push({ template: r.template, source: { type: "base64", ...img } });
+  }
+  return out;
 }
 
 export interface ClaudeResult {
@@ -94,8 +121,11 @@ function buildSystem(): string {
     "Templates:",
     taxonomyPromptBlock(),
     "",
+    "Some messages start with REFERENCE example images, each labeled with its template.",
+    "Use them as visual anchors — a post whose image matches a reference's style is very likely that template (this is the reliable way to recognize quote_card vs other static images).",
+    "",
     "Disambiguation rules:",
-    "- docs.eco.com link → dev_doc_post.",
+    "- docs.eco.com or eco.com/docs link → dev_doc_post.",
     "- External non-Eco link with zero Eco/product mention → broad_educational.",
     "- eco.com blog link + partner @-mention → likely integration_announcement (could be product_post).",
     "- No media, no link, long essay-like text → likely thought_leadership.",
@@ -112,8 +142,19 @@ type Block =
   | { type: "text"; text: string }
   | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
 
-export async function classifyWithClaude(post: ClaudeInput, fewShots: FewShot[]): Promise<ClaudeResult> {
+export async function classifyWithClaude(
+  post: ClaudeInput,
+  fewShots: FewShot[],
+  visualFewShots: VisualFewShot[] = [],
+): Promise<ClaudeResult> {
   const content: Block[] = [];
+
+  // Reference exemplar images first — labeled anchors the model can compare the
+  // post's own image against.
+  for (const v of visualFewShots) {
+    content.push({ type: "text", text: `Reference example — a canonical "${v.template}" post:` });
+    content.push({ type: "image", source: v.source });
+  }
 
   if (fewShots.length) {
     content.push({

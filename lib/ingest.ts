@@ -10,6 +10,7 @@ import {
 } from "./twitter";
 import { runRuleClassification, runClaudeClassification } from "./classify";
 import { enrichByIds, enrichQuotedImages } from "./enrich";
+import { extractDimensions } from "./dimensions";
 
 // Posts younger than this are eligible for a non_public_metrics attempt and for
 // daily re-snapshotting (metrics move fast early, then settle).
@@ -39,12 +40,16 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
     // set enriched_at when we actually have article content (never clobber an
     // existing external-link card with nulls on a re-ingest).
     const hasArticle = !!(p.link_title || p.link_image_url);
+    // Chain/entity sub-dimensions — deterministic, recomputed on every upsert so
+    // a widened vocabulary (lib/dimensions.ts) takes effect on the next sync.
+    const dim = extractDimensions({ text: p.text, mentions: p.mentions, domains: p.domains });
     const rows = await sql<{ inserted: boolean }>`
       INSERT INTO posts (
         id, url, created_at, text, urls, domains, mentions, hashtags,
         media_type, media_urls, preview_image_url,
         is_reply, is_self_reply, is_quote,
         link_title, link_description, link_image_url, quoted_image_url,
+        chains, entities,
         enriched_at, updated_at
       ) VALUES (
         ${p.id}, ${p.url}, ${p.created_at}, ${p.text},
@@ -52,6 +57,7 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         ${p.mediaType}, ${JSON.stringify(p.media_urls)}, ${p.preview_image_url},
         ${p.is_reply}, ${p.is_self_reply}, ${p.is_quote},
         ${p.link_title}, ${p.link_description}, ${p.link_image_url}, ${p.quoted_image_url},
+        ${dim.chains}, ${dim.entities},
         ${hasArticle ? new Date().toISOString() : null}, now()
       )
       ON CONFLICT (id) DO UPDATE SET
@@ -66,6 +72,8 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         is_reply = EXCLUDED.is_reply,
         is_self_reply = EXCLUDED.is_self_reply,
         is_quote = EXCLUDED.is_quote,
+        chains = EXCLUDED.chains,
+        entities = EXCLUDED.entities,
         link_title = COALESCE(EXCLUDED.link_title, posts.link_title),
         link_description = COALESCE(EXCLUDED.link_description, posts.link_description),
         link_image_url = COALESCE(EXCLUDED.link_image_url, posts.link_image_url),

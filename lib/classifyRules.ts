@@ -8,6 +8,7 @@ export interface RuleInput {
   text: string;
   domains: string[];
   mentions: string[];
+  urls: string[]; // expanded/resolved outbound URLs (lowercased), for path-aware rules
   media_type: string; // video | photo | animated_gif | link-card | text
   is_reply: boolean;
   is_self_reply: boolean;
@@ -46,6 +47,34 @@ function externalArticleDomains(domains: string[]): string[] {
   return domains.filter((d) => d && !ECO_DOMAINS.has(d) && !NON_ARTICLE_DOMAINS.has(d));
 }
 
+// URL-path → template. Jay's "the URL is in the post, so you know the category"
+// lever. Only PATTERNS that map to exactly one template regardless of anything
+// else in the post live here — verified against the corpus. (External media
+// domains are deliberately NOT listed: the same outlet shows up as both
+// thought_leadership and broad_educational, so a domain-level settle would
+// misfire; those stay with the generic external-link rule below.) A substring
+// match against any expanded outbound URL. Extend as new Eco properties ship.
+interface UrlRule {
+  match: string; // lowercased substring to find in an outbound URL
+  template: Template;
+  confidence: number;
+  reason: string;
+}
+const URL_TEMPLATE_RULES: UrlRule[] = [
+  // eco.com/docs/... (the docs live under a PATH on the marketing domain, so the
+  // domain-only docs.eco.com check misses them). 6/6 in-corpus are dev docs.
+  { match: "eco.com/docs/", template: "dev_doc_post", confidence: 0.9, reason: "Links to eco.com/docs (developer documentation)." },
+  { match: "docs.eco.com", template: "dev_doc_post", confidence: 0.95, reason: "Links to docs.eco.com (developer documentation)." },
+];
+
+function matchUrlTemplate(urls: string[]): UrlRule | null {
+  for (const u of urls) {
+    const lc = u.toLowerCase();
+    for (const rule of URL_TEMPLATE_RULES) if (lc.includes(rule.match)) return rule;
+  }
+  return null;
+}
+
 // Media-type narrowing (from the spec's disambiguation rules).
 function candidatesForMedia(media: string): Template[] {
   if (media === "video" || media === "animated_gif")
@@ -57,18 +86,19 @@ function candidatesForMedia(media: string): Template[] {
 
 export function classifyByRules(input: RuleInput): RuleResult {
   const domains = input.domains || [];
-  const hasDocs = domains.includes("docs.eco.com");
   const ecoBlog = domains.includes("eco.com");
   const external = externalArticleDomains(domains);
   const eco = mentionsEco(input);
 
-  // R1 — docs.eco.com link → dev_doc_post. Unambiguous.
-  if (hasDocs) {
+  // R1 — known Eco URL pattern (path-aware) → its template. Covers docs.eco.com
+  // AND eco.com/docs/* (a path the old domain-only check missed).
+  const urlRule = matchUrlTemplate(input.urls || []);
+  if (urlRule) {
     return {
-      template: "dev_doc_post",
-      confidence: 0.95,
-      reasoning: "Links to docs.eco.com (developer documentation).",
-      candidates: ["dev_doc_post"],
+      template: urlRule.template,
+      confidence: urlRule.confidence,
+      reasoning: urlRule.reason,
+      candidates: [urlRule.template],
     };
   }
 
@@ -95,7 +125,8 @@ export function classifyByRules(input: RuleInput): RuleResult {
   }
 
   // No media, no link, longer prose → likely thought_leadership (still Stage 2).
-  if (input.media_type === "text" && external.length === 0 && !ecoBlog && !hasDocs && input.text.length > 240) {
+  // (Any docs link already returned via the URL rule above.)
+  if (input.media_type === "text" && external.length === 0 && !ecoBlog && input.text.length > 240) {
     candidates.add("thought_leadership");
   }
 

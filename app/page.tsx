@@ -43,7 +43,7 @@ export default async function OverviewPage({
       <main className="min-w-0 flex-1">
         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <Eyebrow>Overview</Eyebrow>
+            <Eyebrow>Raw</Eyebrow>
             <h1 className="mt-1.5 text-2xl font-medium tracking-[-0.02em]">The whole bag, one screen</h1>
             <p className="mt-1 text-sm text-white/45">
               {total.toLocaleString()} posts · last sync{" "}
