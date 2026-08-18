@@ -155,10 +155,32 @@ export interface ChainAngle {
   readiness: Readiness;
 }
 
+// A concrete, already-published post the operator can put back out for this
+// pillar — the single highest-impression @eco post in the pillar within the
+// freshness window (see SUGGEST_MAX_AGE_DAYS). This is what makes a pillar
+// recommendation prescriptive ("post THIS article", not just "post something
+// thought-leadership-y"). For thought_leadership these are the CEO op-eds and
+// reposted team-member articles the account has run.
+export interface SuggestedPost {
+  id: string;
+  url: string;
+  text: string;
+  created_at: string;
+  daysAgo: number;
+  impressions: number | null;
+  media_type: string;
+  media_urls: string[];
+  preview_image_url: string | null;
+  link_image_url: string | null;
+  quoted_image_url: string | null;
+  link_title: string | null;
+}
+
 export interface Recommendation extends TemplateStat {
   readiness: Readiness;
   score: number;
   chains: ChainAngle[]; // best-performing chain angles for this pillar, if any
+  suggested: SuggestedPost | null; // the specific proven post to re-run, ≤3mo old
 }
 
 export interface ReAmplifyPost {
@@ -186,6 +208,11 @@ export interface Insights {
 
 // How old a post must be before re-amplifying it makes sense.
 const REAMPLIFY_MIN_AGE_DAYS = 45;
+
+// A recommendation's concrete "post this" suggestion must be recent — Robert's
+// rule: never push a thought-leadership article more than 3 months old. Applies
+// to every pillar's suggested post, not just thought_leadership.
+const SUGGEST_MAX_AGE_DAYS = 90;
 
 export async function getInsights(filter: StatFilter): Promise<Insights> {
   const { includeAll, wantAmplified } = ampFlags(filter.amplified);
@@ -244,6 +271,43 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     anglesByTemplate.set(a.template, list);
   }
 
+  // The single best proven post to re-run per pillar, from the last 3 months.
+  // Highest impressions wins; ties broken by recency. Bounded to @eco's own
+  // main posts (reposts/quotes of team-member articles already live here as
+  // thought_leadership posts), so "post this specific article" is defensible.
+  const suggestRows = await sql<SuggestedPost & { template: Template }>`
+    WITH latest AS (
+      SELECT p.id, p.url, p.text, p.created_at, p.template,
+             p.media_type, p.media_urls, p.preview_image_url, p.link_image_url,
+             p.quoted_image_url, p.link_title,
+             s.impressions,
+             EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo",
+             ROW_NUMBER() OVER (
+               PARTITION BY p.template
+               ORDER BY s.impressions DESC NULLS LAST, p.created_at DESC
+             ) AS rn
+      FROM posts p
+      LEFT JOIN LATERAL (
+        SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+      ) s ON true
+      WHERE p.template IS NOT NULL AND p.template <> 'other'
+        AND p.is_reply = false
+        AND (${includeAll} OR p.amplified = ${wantAmplified})
+        AND p.created_at >= now() - (${SUGGEST_MAX_AGE_DAYS} || ' days')::interval
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    )
+    SELECT id, url, text, created_at, template, media_type, media_urls,
+           preview_image_url, link_image_url, quoted_image_url, link_title,
+           impressions, "daysAgo"
+    FROM latest WHERE rn = 1
+  `;
+  const suggestedByTemplate = new Map<Template, SuggestedPost>(
+    suggestRows.map((r) => {
+      const { template, ...post } = r;
+      return [template, post];
+    }),
+  );
+
   const recommendations: Recommendation[] = overview
     .filter((t) => t.template !== "other")
     .map((t) => {
@@ -253,6 +317,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         readiness: readinessOf(t.daysSince, t.staleDays),
         score: Math.round(perf * recencyWeight(t.daysSince, t.staleDays)),
         chains: anglesByTemplate.get(t.template) ?? [],
+        suggested: suggestedByTemplate.get(t.template) ?? null,
       };
     })
     .sort((a, b) => b.score - a.score || (b.daysSince ?? -1) - (a.daysSince ?? -1));

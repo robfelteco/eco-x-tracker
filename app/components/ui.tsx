@@ -57,7 +57,42 @@ export function Thumb({
   const dim = { width: size, height: size };
   const box =
     "flex-none overflow-hidden rounded-md border border-white/10 bg-white/[0.03]";
-  if (!src) return <div className={box} style={dim} aria-hidden />;
+  // No image resolved for this post (pure-text post, dead/404 link, or an
+  // X-article with no cover). Show a muted "no preview" glyph so the empty tile
+  // reads as "couldn't pull an asset" rather than a loading/broken state — and
+  // still link it to the post on X when we have the permalink.
+  if (!src) {
+    const glyph = Math.round(size * 0.44);
+    const placeholder = (
+      <div
+        className={`${box} flex items-center justify-center text-white/20`}
+        style={dim}
+        title={href ? "No preview — open on X ↗" : "No preview available"}
+      >
+        {/* image-off icon */}
+        <svg width={glyph} height={glyph} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M2 2l20 20" />
+          <path d="M21 15.5V5a2 2 0 0 0-2-2H8.5" />
+          <path d="M3.5 3.53A2 2 0 0 0 3 5v14a2 2 0 0 0 2 2h14a2 2 0 0 0 1.47-.53" />
+          <path d="M21 15l-5-5" />
+          <path d="M3 16l5-5 4 4" />
+        </svg>
+      </div>
+    );
+    return href ? (
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        title="No preview — open on X ↗"
+        className="block transition hover:text-white/35 hover:opacity-90"
+      >
+        {placeholder}
+      </a>
+    ) : (
+      placeholder
+    );
+  }
   const img = (
     // eslint-disable-next-line @next/next/no-img-element
     <img

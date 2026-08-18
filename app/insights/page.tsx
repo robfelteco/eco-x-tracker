@@ -1,4 +1,4 @@
-import { getInsights, type Recommendation, type ChainAngle, type Readiness } from "@/lib/stats";
+import { getInsights, type Recommendation, type ChainAngle, type Readiness, type SuggestedPost } from "@/lib/stats";
 import { getReviewCount } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
 import { FilterBar } from "@/app/components/FilterBar";
@@ -173,6 +173,8 @@ function RecCard({ rec, rank }: { rec: Recommendation; rank: number }) {
         </div>
       </div>
 
+      {rec.suggested && <SuggestedPostBlock post={rec.suggested} />}
+
       {rec.chains.length > 0 && (
         <div className="mt-3 border-t border-white/[0.07] pt-3">
           <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-white/30">
@@ -185,6 +187,37 @@ function RecCard({ rec, rank }: { rec: Recommendation; rank: number }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// The concrete "post this" prescription: the proven, ≤3-month-old post to put
+// back out for this pillar. Clickable straight through to X.
+function SuggestedPostBlock({ post }: { post: SuggestedPost }) {
+  return (
+    <div className="mt-3 border-t border-white/[0.07] pt-3">
+      <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-white/30">
+        Post this — proven piece, last 3 months
+      </div>
+      <a
+        href={post.url}
+        target="_blank"
+        rel="noreferrer"
+        className="group flex gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-2.5 transition hover:border-eco-lightblue/40 hover:bg-white/[0.05]"
+      >
+        <Thumb src={pickThumb(post)} size={52} />
+        <div className="min-w-0 flex-1">
+          <p className="line-clamp-2 text-sm text-white/85">{post.link_title || post.text}</p>
+          <div className="mt-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-white/35">
+            <span className="text-eco-lightblue/80">{compact(post.impressions ?? 0)} impr</span>
+            <span>·</span>
+            <span>{writtenDate(post.created_at)}</span>
+            <span>·</span>
+            <span>{daysAgo(post.daysAgo)}</span>
+            <span className="text-eco-lightblue/70 opacity-0 transition group-hover:opacity-100">· open on X ↗</span>
+          </div>
+        </div>
+      </a>
     </div>
   );
 }
