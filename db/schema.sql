@@ -194,3 +194,45 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS chains   text[] NOT NULL DEFAULT '{}'
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS entities text[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS posts_chains_idx   ON posts USING gin (chains);
 CREATE INDEX IF NOT EXISTS posts_entities_idx ON posts USING gin (entities);
+
+-- ---------------------------------------------------------------------------
+-- Migration 005 — recommendation_uses: the recursion loop.
+--
+-- Jay's core ask: the tool must know when a post came from its own
+-- recommendation vs. organically, keep score of what it drove, and learn from
+-- whether that post did well. "If I use integration-announcement → Tron and
+-- push it, it should know you did it based on its recommendation, count it, and
+-- know if it did well afterwards — and adjust its recommendation."
+--
+-- Flow: operator clicks "Mark as used" on a recommendation → an OPEN row here.
+-- At the next sync, attributeUses() matches a newly-ingested @eco post of the
+-- same pillar (and chain, if one was chosen) published after used_at to that
+-- open row → status 'matched', matched_post_id set. The post's performance then
+-- rides on the normal metric_snapshots, so History can show used → posted →
+-- impressions, and scoring can discount pillars whose rec-driven posts flop.
+--
+-- We deliberately DON'T take credit for organic posts: a matching post only
+-- counts as attributed if an open use was waiting for it. Credit where due.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS recommendation_uses (
+  id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  template          content_template NOT NULL,        -- pillar the operator chose to act on
+  chain             text,                              -- chosen chain angle (canonical id), or null
+  angle             text,                              -- optional free-text topic/angle note
+  score_at_use      integer,                           -- the 0..100 priority score when used (calibration)
+  suggested_post_id text REFERENCES posts(id) ON DELETE SET NULL, -- the proven post it suggested, if any
+
+  status            text NOT NULL DEFAULT 'open',      -- 'open' | 'matched' | 'dismissed'
+  matched_post_id   text REFERENCES posts(id) ON DELETE SET NULL, -- resulting @eco post, once attributed
+  matched_at        timestamptz,
+
+  used_by           text NOT NULL DEFAULT 'public',    -- operator email once auth lands
+  used_at           timestamptz NOT NULL DEFAULT now(),
+  note              text
+);
+CREATE INDEX IF NOT EXISTS rec_uses_status_idx   ON recommendation_uses (status);
+CREATE INDEX IF NOT EXISTS rec_uses_template_idx ON recommendation_uses (template);
+CREATE INDEX IF NOT EXISTS rec_uses_used_at_idx  ON recommendation_uses (used_at DESC);
+-- Never attribute the same post to two different uses.
+CREATE UNIQUE INDEX IF NOT EXISTS rec_uses_matched_uidx
+  ON recommendation_uses (matched_post_id) WHERE matched_post_id IS NOT NULL;

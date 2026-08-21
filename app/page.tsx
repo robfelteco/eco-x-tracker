@@ -4,7 +4,8 @@ import { getReviewCount, getPostCount, getLastSyncRun } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
 import { FilterBar } from "@/app/components/FilterBar";
 import { parseFilter } from "@/lib/filter";
-import { Eyebrow } from "@/app/components/ui";
+import { Eyebrow, Tooltip } from "@/app/components/ui";
+import { METRIC_DEFS } from "@/lib/metricDefs";
 
 export const dynamic = "force-dynamic";
 
@@ -62,11 +63,21 @@ export default async function OverviewPage({
               <tr className="bg-white/[0.03] text-left font-mono text-[10px] uppercase tracking-wider text-white/40">
                 <th className="px-3 py-2.5 font-medium">Template</th>
                 <th className="px-3 py-2.5 font-medium">Last posted</th>
-                <th className="px-3 py-2.5 text-right font-medium">Days since</th>
-                <th className="px-3 py-2.5 text-right font-medium">30d</th>
-                <th className="px-3 py-2.5 text-right font-medium">90d</th>
-                <th className="px-3 py-2.5 text-right font-medium">Median impr</th>
-                <th className="px-3 py-2.5 text-right font-medium">Avg eng</th>
+                <th className="px-3 py-2.5 text-right font-medium">
+                  <Tooltip text={METRIC_DEFS.daysSince} underline>Days since</Tooltip>
+                </th>
+                <th className="px-3 py-2.5 text-right font-medium">
+                  <Tooltip text={METRIC_DEFS.count30} underline>30d</Tooltip>
+                </th>
+                <th className="px-3 py-2.5 text-right font-medium">
+                  <Tooltip text={METRIC_DEFS.count90} underline>90d</Tooltip>
+                </th>
+                <th className="px-3 py-2.5 text-right font-medium">
+                  <Tooltip text={METRIC_DEFS.medianImpr} underline>Median impr</Tooltip>
+                </th>
+                <th className="px-3 py-2.5 text-right font-medium">
+                  <Tooltip text={METRIC_DEFS.avgEng} underline>Avg eng</Tooltip>
+                </th>
               </tr>
             </thead>
             <tbody>

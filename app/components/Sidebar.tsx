@@ -30,7 +30,7 @@ export function Sidebar({ reviewCount }: { reviewCount?: number }) {
 
   return (
     <nav className="flex w-56 flex-none flex-col gap-0.5">
-      {item("/insights", "Insights", pathname === "/insights")}
+      {item("/insights", "Prioritize", pathname === "/insights")}
       {item("/", "Raw", pathname === "/")}
       <div className="mt-3 mb-1 px-2.5 font-mono text-[10px] uppercase tracking-wider text-white/30">Templates</div>
       {TEMPLATE_DEFS.filter((t) => t.id !== "other").map((t) =>
@@ -38,6 +38,7 @@ export function Sidebar({ reviewCount }: { reviewCount?: number }) {
       )}
       {item(`/t/other`, "Other", pathname === `/t/other`)}
       <div className="mt-3 mb-1 px-2.5 font-mono text-[10px] uppercase tracking-wider text-white/30">Data</div>
+      {item("/history", "History", pathname === "/history")}
       {item("/posts", "All posts", pathname === "/posts")}
       {item("/review", "Review queue", pathname === "/review", reviewCount)}
     </nav>

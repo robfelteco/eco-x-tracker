@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runSync } from "@/lib/ingest";
 import { runRuleClassification, runClaudeClassification } from "@/lib/classify";
+import { attributeUses } from "@/lib/recUses";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,8 +39,18 @@ async function handle(req: NextRequest) {
       classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
     }
 
+    // Close the recursion loop: tie any open "marked as used" recommendations to
+    // the @eco posts that fulfilled them (newly-classified above). Best-effort —
+    // never fails the sync.
+    let attributed = 0;
+    try {
+      attributed = await attributeUses();
+    } catch (err) {
+      classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
+    }
+
     return NextResponse.json(
-      { ...result, classified: { ruleSettled, claudeClassified, errors: classifyErrors } },
+      { ...result, classified: { ruleSettled, claudeClassified, errors: classifyErrors }, attributed },
       { status: result.ok ? 200 : 207 },
     );
   } catch (err) {

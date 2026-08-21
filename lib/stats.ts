@@ -1,6 +1,7 @@
 import { sql } from "./db";
 import { TEMPLATE_BY_ID, type Template } from "./taxonomy";
-import { chainLabel } from "./dimensions";
+import { chainLabel, entityLabel } from "./dimensions";
+import { getRecDrivenPerf } from "./recUses";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
 // organic posts corrupts a template's baselines, so every stat is filterable.
@@ -21,6 +22,7 @@ export interface TemplateStat {
   staleDays: number;
   lastPosted: string | null;
   daysSince: number | null;
+  lastMediaType: string | null; // media_type of the most-recent post (article/video/photo/…)
   count30: number;
   count90: number;
   countTotal: number;
@@ -37,7 +39,7 @@ export async function getOverview(filter: StatFilter): Promise<TemplateStat[]> {
   const { includeAll, wantAmplified } = ampFlags(filter.amplified);
   const rows = await sql<Omit<TemplateStat, "label" | "staleDays">>`
     WITH latest AS (
-      SELECT p.id, p.template, p.created_at,
+      SELECT p.id, p.template, p.created_at, p.media_type,
              s.impressions, s.likes, s.replies, s.retweets, s.quotes, s.bookmarks
       FROM posts p
       LEFT JOIN LATERAL (
@@ -52,6 +54,7 @@ export async function getOverview(filter: StatFilter): Promise<TemplateStat[]> {
       template,
       MAX(created_at) AS "lastPosted",
       EXTRACT(DAY FROM now() - MAX(created_at))::int AS "daysSince",
+      (array_agg(media_type ORDER BY created_at DESC))[1] AS "lastMediaType",
       COUNT(*) FILTER (WHERE created_at > now() - interval '30 days')::int AS "count30",
       COUNT(*) FILTER (WHERE created_at > now() - interval '90 days')::int AS "count90",
       COUNT(*)::int AS "countTotal",
@@ -77,6 +80,7 @@ export async function getOverview(filter: StatFilter): Promise<TemplateStat[]> {
         staleDays: d.staleDays,
         lastPosted: r?.lastPosted ?? null,
         daysSince: r?.daysSince ?? null,
+        lastMediaType: r?.lastMediaType ?? null,
         count30: r?.count30 ?? 0,
         count90: r?.count90 ?? 0,
         countTotal: r?.countTotal ?? 0,
@@ -144,6 +148,54 @@ function recencyWeight(daysSince: number | null, staleDays: number): number {
   return 1 + Math.min((daysSince - staleDays) / staleDays, 1); // overdue: 1..2
 }
 
+// Number formatter for reason strings (12.3k). Local so stats.ts stays free of
+// UI imports.
+function short(n: number | null): string {
+  if (n == null) return "—";
+  if (Math.abs(n) >= 1000) return Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  return String(Math.round(n));
+}
+
+// Turn the raw perf×overdue signals into a bounded 0..100 priority the operator
+// can actually read, plus the plain-English drivers behind it. Jay's ask: "does
+// this engine know it's a 90 out of 100 — and I should understand why."
+//   overdue component (0..1): how far past cadence we are (fresh/never → 0).
+//   perf component   (0..1): this pillar's baseline impressions vs the other
+//                            pillars (a percentile), so a strong pillar that's
+//                            also overdue outranks a weak one that's merely late.
+// A fresh/never pillar scores 0 and drops to the "resting" list, same split as
+// before — we just make the surviving scores legible and defensible.
+function scoreParts(args: {
+  readiness: Readiness;
+  daysSince: number | null;
+  staleDays: number;
+  perfPct: number | null; // 0..1 percentile of baseline impressions across pillars
+  baselineImpr: number | null;
+  discounted: boolean;
+}): { score: number; reasons: string[] } {
+  const { readiness, daysSince, staleDays, perfPct, baselineImpr, discounted } = args;
+  const recW = recencyWeight(daysSince, staleDays);
+  if (recW === 0) return { score: 0, reasons: [] };
+
+  const overdueComponent = Math.min(recW / 2, 1); // 0.25 (warming) .. 1 (very overdue)
+  const perfComponent = perfPct ?? 0.5; // unknown perf → neutral
+  const score = Math.max(1, Math.round(100 * (0.55 * overdueComponent + 0.45 * perfComponent)));
+
+  const reasons: string[] = [];
+  if (readiness === "due" && daysSince != null) {
+    reasons.push(`Overdue by ${daysSince - staleDays}d past its ${staleDays}d cadence`);
+  } else if (readiness === "soon" && daysSince != null) {
+    reasons.push(`Warming — ${daysSince}d of ${staleDays}d cadence used`);
+  }
+  if (perfPct != null && baselineImpr != null) {
+    if (perfPct >= 0.75) reasons.push(`Top performer — ${short(baselineImpr)} median impressions`);
+    else if (perfPct >= 0.5) reasons.push(`Above-median performer (${short(baselineImpr)} median)`);
+    else reasons.push(`Below-median performer (${short(baselineImpr)} median)`);
+  }
+  if (discounted) reasons.push(`Baseline excludes amplified & launch posts`);
+  return { score, reasons };
+}
+
 export interface ChainAngle {
   chain: string;
   label: string;
@@ -178,7 +230,13 @@ export interface SuggestedPost {
 
 export interface Recommendation extends TemplateStat {
   readiness: Readiness;
-  score: number;
+  score: number; // 0..100 priority (0 = fresh/never, don't recommend now)
+  scoreReasons: string[]; // human-readable drivers behind the score ("why")
+  baselineImpr: number | null; // clean performance baseline (organic, launch post excluded)
+  discounted: boolean; // true when the raw median was inflated by amplified/launch posts
+  recDrivenCount: number; // # of posts this pillar has produced FROM a recommendation
+  recDrivenVsBaseline: number | null; // rec-driven median ÷ baseline (1 = on par); null if none
+  easyWin: boolean; // low-effort format worth a quick post (quote card, motion visual)
   chains: ChainAngle[]; // best-performing chain angles for this pillar, if any
   suggested: SuggestedPost | null; // the specific proven post to re-run, ≤3mo old
 }
@@ -201,10 +259,70 @@ export interface ReAmplifyPost {
   impressions: number | null;
 }
 
+export interface RecentChain {
+  chain: string;
+  label: string;
+  count: number;
+}
+
+// Thought-leadership sits on ARTICLES, not chains — Robert wants the full shelf
+// of TL pieces, ranked, each clickable to draft from. One row per TL post.
+export interface TLArticle {
+  id: string;
+  url: string;
+  title: string;
+  impressions: number | null;
+  created_at: string;
+  daysAgo: number;
+  mediaType: string;
+  score: number; // 0..100 within-pillar percentile of impressions
+}
+
+// Broad-educational never reshares the same piece, so instead of "post this
+// again" we show what WORKED as an approach: content-type mix, the entities that
+// landed, and a few reference angles. The actual sourcing comes from Discover.
+export interface BroadEdType {
+  mediaType: string;
+  count: number;
+  medianImpr: number | null;
+}
+export interface BroadEdEntity {
+  entity: string;
+  label: string;
+  count: number;
+  medianImpr: number | null;
+}
+export interface BroadEdAngle {
+  id: string;
+  url: string;
+  title: string;
+  impressions: number | null;
+  created_at: string;
+  mediaType: string;
+  entities: string[];
+}
+export interface BroadEdBreakdown {
+  byType: BroadEdType[];
+  topEntities: BroadEdEntity[];
+  topAngles: BroadEdAngle[];
+}
+
 export interface Insights {
   recommendations: Recommendation[];
   reAmplify: ReAmplifyPost[];
+  recentChains: RecentChain[]; // chains that showed up in the feed in the last few days
+  thoughtLeadership: TLArticle[]; // full ranked shelf of TL pieces
+  broadEducational: BroadEdBreakdown; // what has worked in broad-educational, by approach
 }
+
+// Low-effort, high-frequency formats Jay flags as "easy wins" — a quick post
+// that doesn't need a big lift ("post a quote card, that'll take 10 minutes,
+// the last 10 ripped").
+const EASY_WIN_TEMPLATES = new Set<Template>(["quote_card", "data_motion_visual"]);
+
+// How recent a post has to be to count as "in the feed right now" for the
+// context-aware nudge.
+const RECENT_CONTEXT_DAYS = 4;
 
 // How old a post must be before re-amplifying it makes sense.
 const REAMPLIFY_MIN_AGE_DAYS = 45;
@@ -308,19 +426,111 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     }),
   );
 
+  // Clean performance baseline per pillar for scoring: ORGANIC posts only, with
+  // each pillar's FIRST-EVER post excluded. Jay: "don't count the first post —
+  // those are back-channeled with boosting, we were manufacturing success." So
+  // the median a pillar is judged on never includes the amplified launch spike.
+  const baselineRows = await sql<{ template: Template; baselineImpr: number | null }>`
+    WITH latest AS (
+      SELECT p.id, p.template, p.created_at, s.impressions,
+             ROW_NUMBER() OVER (PARTITION BY p.template ORDER BY p.created_at ASC) AS seq
+      FROM posts p
+      LEFT JOIN LATERAL (
+        SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+      ) s ON true
+      WHERE p.template IS NOT NULL AND p.template <> 'other'
+        AND p.is_reply = false
+        AND p.amplified = false
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    )
+    SELECT template,
+      ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY impressions)
+            FILTER (WHERE seq > 1))::int AS "baselineImpr"
+    FROM latest
+    GROUP BY template
+  `;
+  const baselineByTemplate = new Map(baselineRows.map((r) => [r.template, r.baselineImpr]));
+
+  // Feedback signal: how posts this pillar produced FROM a recommendation have
+  // actually performed vs its baseline. This is what makes the engine recursive.
+  const recDriven = await getRecDrivenPerf();
+
+  // Rank baseline impressions across pillars → each pillar's performance
+  // percentile (0..1). A pillar with no clean baseline gets null (neutral).
+  const baselineVals = [...baselineByTemplate.values()].filter((v): v is number => v != null).sort((a, b) => a - b);
+  const perfPctOf = (v: number | null): number | null => {
+    if (v == null || baselineVals.length === 0) return null;
+    const below = baselineVals.filter((x) => x <= v).length;
+    return below / baselineVals.length;
+  };
+
   const recommendations: Recommendation[] = overview
     .filter((t) => t.template !== "other")
     .map((t) => {
-      const perf = t.medianImpr ?? t.avgImpr ?? 0;
+      const readiness = readinessOf(t.daysSince, t.staleDays);
+      const baselineImpr = baselineByTemplate.get(t.template) ?? null;
+      // "Discounted" = the displayed median is materially above the clean
+      // baseline, i.e. amplified/launch posts were inflating it.
+      const discounted = baselineImpr != null && t.medianImpr != null && t.medianImpr > baselineImpr * 1.15;
+      const { score, reasons } = scoreParts({
+        readiness,
+        daysSince: t.daysSince,
+        staleDays: t.staleDays,
+        perfPct: perfPctOf(baselineImpr),
+        baselineImpr,
+        discounted,
+      });
+
+      // Recursive adjustment: once a pillar has ≥2 rec-driven posts, nudge its
+      // score by how those posts did vs baseline. Underperformers cool off;
+      // over-performers get a small boost. Only applied to a live (non-zero)
+      // score so resting pillars stay resting.
+      const rd = recDriven.get(t.template);
+      let adjScore = score;
+      if (score > 0 && rd && rd.matchedCount >= 2 && rd.vsBaseline != null) {
+        if (rd.vsBaseline < 0.8) {
+          adjScore = Math.max(1, Math.round(score * 0.85));
+          reasons.push(`Cooled — recent posts you ran from this averaged below its baseline`);
+        } else if (rd.vsBaseline > 1.2) {
+          adjScore = Math.min(100, Math.round(score * 1.1));
+          reasons.push(`Boosted — posts you ran from this beat its baseline`);
+        }
+      }
+
       return {
         ...t,
-        readiness: readinessOf(t.daysSince, t.staleDays),
-        score: Math.round(perf * recencyWeight(t.daysSince, t.staleDays)),
+        readiness,
+        score: adjScore,
+        scoreReasons: reasons,
+        baselineImpr,
+        discounted,
+        recDrivenCount: rd?.matchedCount ?? 0,
+        recDrivenVsBaseline: rd?.vsBaseline ?? null,
+        easyWin: EASY_WIN_TEMPLATES.has(t.template),
         chains: anglesByTemplate.get(t.template) ?? [],
         suggested: suggestedByTemplate.get(t.template) ?? null,
       };
     })
     .sort((a, b) => b.score - a.score || (b.daysSince ?? -1) - (a.daysSince ?? -1));
+
+  // Context-aware nudge: which chains are already live in the feed this week, so
+  // the operator can ride adjacent topics ("you posted Tron yesterday — educate
+  // something Tron-related") instead of starting cold.
+  const recentChainRows = await sql<{ chain: string; count: number }>`
+    WITH recent AS (
+      SELECT unnest(chains) AS chain
+      FROM posts
+      WHERE is_reply = false
+        AND created_at > now() - (${RECENT_CONTEXT_DAYS} || ' days')::interval
+    )
+    SELECT chain, COUNT(*)::int AS count
+    FROM recent GROUP BY chain ORDER BY count DESC, chain LIMIT 6
+  `;
+  const recentChains: RecentChain[] = recentChainRows.map((r) => ({
+    chain: r.chain,
+    label: chainLabel(r.chain),
+    count: r.count,
+  }));
 
   // Past bangers old enough to recycle — top by impressions, older than the
   // re-amplify floor, so "re-post this one" is always defensible.
@@ -345,7 +555,81 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   `;
   for (const p of reAmplify) p.templateLabel = TEMPLATE_BY_ID[p.template].label;
 
-  return { recommendations, reAmplify };
+  // Thought-leadership shelf: every TL piece, ranked by impressions, each with a
+  // within-pillar 0..100 score and its last-posted date. Clickable to draft from.
+  const tlRows = await sql<Omit<TLArticle, "score"> & { rankPct: number }>`
+    WITH latest AS (
+      SELECT p.id, p.url, COALESCE(NULLIF(p.link_title, ''), p.text) AS title,
+             p.created_at, p.media_type AS "mediaType",
+             s.impressions,
+             EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo"
+      FROM posts p
+      LEFT JOIN LATERAL (
+        SELECT impressions FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+      ) s ON true
+      WHERE p.template = 'thought_leadership' AND p.is_reply = false
+        AND (${includeAll} OR p.amplified = ${wantAmplified})
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    )
+    SELECT id, url, title, impressions, created_at, "mediaType", "daysAgo",
+           percent_rank() OVER (ORDER BY impressions ASC NULLS FIRST) AS "rankPct"
+    FROM latest
+    ORDER BY impressions DESC NULLS LAST
+    LIMIT 20
+  `;
+  const thoughtLeadership: TLArticle[] = tlRows.map((r) => {
+    const { rankPct, ...rest } = r;
+    return { ...rest, score: Math.round((rankPct ?? 0) * 100) };
+  });
+
+  // Broad-educational "what worked", by approach (never reshare the same piece).
+  const beTypeRows = await sql<BroadEdType>`
+    SELECT p.media_type AS "mediaType", COUNT(*)::int AS count,
+           ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY s.impressions))::int AS "medianImpr"
+    FROM posts p
+    LEFT JOIN LATERAL (
+      SELECT impressions FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+    ) s ON true
+    WHERE p.template = 'broad_educational' AND p.is_reply = false
+      AND (${includeAll} OR p.amplified = ${wantAmplified})
+      AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    GROUP BY p.media_type ORDER BY "medianImpr" DESC NULLS LAST
+  `;
+  const beEntityRows = await sql<{ entity: string; count: number; medianImpr: number | null }>`
+    WITH exploded AS (
+      SELECT unnest(p.entities) AS entity, s.impressions
+      FROM posts p
+      LEFT JOIN LATERAL (
+        SELECT impressions FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+      ) s ON true
+      WHERE p.template = 'broad_educational' AND p.is_reply = false
+        AND (${includeAll} OR p.amplified = ${wantAmplified})
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    )
+    SELECT entity, COUNT(*)::int AS count,
+           ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY impressions))::int AS "medianImpr"
+    FROM exploded GROUP BY entity ORDER BY "medianImpr" DESC NULLS LAST, count DESC LIMIT 6
+  `;
+  const beAngleRows = await sql<BroadEdAngle>`
+    SELECT p.id, p.url, COALESCE(NULLIF(p.link_title, ''), p.text) AS title,
+           s.impressions, p.created_at, p.media_type AS "mediaType", p.entities
+    FROM posts p
+    LEFT JOIN LATERAL (
+      SELECT impressions FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+    ) s ON true
+    WHERE p.template = 'broad_educational' AND p.is_reply = false
+      AND (${includeAll} OR p.amplified = ${wantAmplified})
+      AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    ORDER BY s.impressions DESC NULLS LAST
+    LIMIT 4
+  `;
+  const broadEducational: BroadEdBreakdown = {
+    byType: beTypeRows,
+    topEntities: beEntityRows.map((e) => ({ ...e, label: entityLabel(e.entity) })),
+    topAngles: beAngleRows,
+  };
+
+  return { recommendations, reAmplify, recentChains, thoughtLeadership, broadEducational };
 }
 
 export async function getTemplateDetail(template: Template, filter: StatFilter): Promise<TemplateDetail> {

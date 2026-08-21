@@ -29,6 +29,35 @@ export function Badge({ children, tone = "neutral" }: { children: ReactNode; ton
   return <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${BADGE_TONES[tone]}`}>{children}</span>;
 }
 
+// Hover tooltip — pure CSS (group-hover), no client JS, safe in server
+// components. Wrap any element; pass the explainer text. Jay's "very easy UX
+// improvement": every stat and chip should say what it means on hover instead
+// of making you stare at it. `underline` dots the trigger so it reads as
+// hoverable.
+export function Tooltip({
+  children,
+  text,
+  underline = false,
+}: {
+  children: ReactNode;
+  text: string;
+  underline?: boolean;
+}) {
+  return (
+    <span className="group/tt relative inline-flex items-center">
+      <span className={underline ? "decoration-dotted decoration-white/25 underline underline-offset-2" : ""}>
+        {children}
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 hidden w-max max-w-[260px] -translate-x-1/2 rounded-lg border border-white/10 bg-[#0a0a0a] px-2.5 py-1.5 text-left text-[11px] font-normal leading-snug text-white/80 shadow-lg group-hover/tt:block"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
 // Tiny mono tag chip (row-kind labels).
 export function Tag({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "amber" | "brand" }) {
   const cls =

@@ -57,9 +57,17 @@ const CHAIN_HANDLES: Record<string, string> = {
   berachain: "berachain",
 };
 
-// Distinctive text tokens → chain. Only unambiguous multi-char names; generic
-// words that also mean something else in English (base, tempo, ton, sei, op)
-// are intentionally left to the @handle map above to avoid false positives.
+// Distinctive text tokens → chain. Only unambiguous crypto-specific names.
+// Generic words that ALSO mean something in ordinary English are intentionally
+// NOT here — they'd tag posts that never mention the chain. The @handle map
+// above is the reliable signal for those. Excluded on purpose:
+//   base, tempo, ton, sei, op            — short generic words
+//   stellar, optimism, avalanche         — common English adjectives/nouns.
+//     ("stellar growth", "cautious optimism", "an avalanche of…") — these were
+//     the source of the phantom "Stellar" chip Jay flagged: a Western Union /
+//     SoFi / MoneyGram post got tagged Stellar purely for the word "stellar".
+//   celo, monad                          — real words / names in other contexts.
+// Every excluded chain is still detected whenever its @handle is mentioned.
 const CHAIN_KEYWORDS: Record<string, string[]> = {
   ethereum: ["ethereum"],
   solana: ["solana"],
@@ -67,15 +75,10 @@ const CHAIN_KEYWORDS: Record<string, string[]> = {
   tron: ["tron"],
   bnb: ["bnb chain", "bnbchain"],
   arbitrum: ["arbitrum"],
-  optimism: ["optimism"],
-  avalanche: ["avalanche"],
   hyperliquid: ["hyperliquid"],
   aptos: ["aptos"],
-  stellar: ["stellar"],
   zksync: ["zksync"],
   starknet: ["starknet"],
-  celo: ["celo"],
-  monad: ["monad"],
   berachain: ["berachain"],
 };
 
