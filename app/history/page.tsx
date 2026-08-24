@@ -27,7 +27,7 @@ export default async function HistoryPage() {
         {rows.length === 0 ? (
           <p className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-10 text-center text-sm text-white/40">
             Nothing yet. On the{" "}
-            <a href="/insights" className="text-eco-lightblue hover:underline">
+            <a href="/" className="text-eco-lightblue hover:underline">
               Prioritize
             </a>{" "}
             board, click <span className="text-white/70">Mark as used</span> when you act on a recommendation — it

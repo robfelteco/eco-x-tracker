@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen bg-black font-sans text-white antialiased">
         <header className="sticky top-0 z-10 border-b border-white/10 bg-black/70 backdrop-blur">
           <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
-            <Link href="/insights" className="text-sm font-medium tracking-[-0.01em] transition hover:opacity-80">
+            <Link href="/" className="text-sm font-medium tracking-[-0.01em] transition hover:opacity-80">
               Eco <span className="text-white/30">·</span> X Template Tracker
             </Link>
             {/* eslint-disable-next-line @next/next/no-img-element */}

@@ -30,8 +30,8 @@ export function Sidebar({ reviewCount }: { reviewCount?: number }) {
 
   return (
     <nav className="flex w-56 flex-none flex-col gap-0.5">
-      {item("/insights", "Prioritize", pathname === "/insights")}
-      {item("/", "Raw", pathname === "/")}
+      {item("/", "Prioritize", pathname === "/")}
+      {item("/raw", "Raw", pathname === "/raw")}
       <div className="mt-3 mb-1 px-2.5 font-mono text-[10px] uppercase tracking-wider text-white/30">Templates</div>
       {TEMPLATE_DEFS.filter((t) => t.id !== "other").map((t) =>
         item(`/t/${t.id}`, t.label, pathname === `/t/${t.id}`),
