@@ -1,7 +1,7 @@
-import { sql } from "./db";
-import { classifyByRules, type RuleInput } from "./classifyRules";
-import { classifyWithClaude, encodeVisualFewShots, type ClaudeInput, type FewShot, type VisualFewShot } from "./classifyClaude";
-import { REVIEW_THRESHOLD, type Template } from "./taxonomy";
+import { sql } from "./db.ts";
+import { classifyByRules, type RuleInput } from "./classifyRules.ts";
+import { classifyWithClaude, encodeVisualFewShots, type ClaudeInput, type FewShot, type VisualFewShot } from "./classifyClaude.ts";
+import { REVIEW_THRESHOLD, type Template } from "./taxonomy.ts";
 
 interface ClassifiableRow extends RuleInput {
   id: string;
@@ -183,7 +183,9 @@ export async function runClaudeClassification(limit = 600): Promise<ClaudeRunRes
       if (res.confidence < REVIEW_THRESHOLD || res.template === "other") review++;
     } catch (err) {
       errors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
-      if (/401|invalid.*api.*key|ANTHROPIC_API_KEY/i.test(String(err))) break; // no key → stop
+      // No key, bad key, or an empty balance fails identically for every
+      // remaining post — stop instead of burning the whole queue on it.
+      if (/credit balance|401|invalid.*api.*key|ANTHROPIC_API_KEY/i.test(String(err))) break;
     }
   }
 
@@ -217,4 +219,76 @@ export async function classificationBreakdown(): Promise<{ template: Template | 
     SELECT template, class_source AS source, COUNT(*)::int AS n
     FROM posts GROUP BY template, class_source ORDER BY n DESC`;
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Re-classification. Used when the TAXONOMY itself changes, not when new posts
+// arrive — the descriptions in lib/taxonomy.ts are what Stage 2 classifies
+// against, so redefining a pillar means everything already filed under it was
+// filed under the old definition.
+//
+// Concretely: "Integration Announcement" became "New Chain Integrations in Eco"
+// (a new blockchain going live in Eco), and partner/company integrations of Eco
+// products moved into "Product Posts". Roughly a third of the old bucket was
+// partner integrations, so those rows had to be re-decided.
+//
+// Auto-applies, per Robert: anything that lands wrong is one click to re-file in
+// the review queue. Human labels are still never touched.
+// ---------------------------------------------------------------------------
+
+export interface Flip {
+  id: string;
+  url: string;
+  from: Template | null;
+  to: Template | null;
+  confidence: number | null;
+  text: string;
+}
+
+export interface ReclassifyResult {
+  reset: number;
+  ruleSettled: number;
+  claudeClassified: number;
+  costUsd: number;
+  flips: Flip[];
+  stayed: number;
+  errors: string[];
+}
+
+export async function reclassify(templates: Template[]): Promise<ReclassifyResult> {
+  const before = await sql<{ id: string; template: Template }>`
+    SELECT id, template FROM posts
+    WHERE template = ANY(${templates}::content_template[])
+      AND class_source IS DISTINCT FROM 'human'
+      AND is_reply = false`;
+  const prev = new Map(before.map((r) => [r.id, r.template]));
+
+  await sql`
+    UPDATE posts SET template = NULL, confidence = NULL, reasoning = NULL,
+      class_source = NULL, classified_at = NULL, updated_at = now()
+    WHERE id = ANY(${before.map((r) => r.id)})`;
+
+  const rules = await runRuleClassification(false);
+  const claude = await runClaudeClassification();
+
+  const after = await sql<{ id: string; url: string; template: Template | null; confidence: number | null; text: string }>`
+    SELECT id, url, template, confidence, text FROM posts WHERE id = ANY(${before.map((r) => r.id)})`;
+
+  const flips: Flip[] = [];
+  let stayed = 0;
+  for (const a of after) {
+    const from = prev.get(a.id) ?? null;
+    if (a.template === from) stayed++;
+    else flips.push({ id: a.id, url: a.url, from, to: a.template, confidence: a.confidence, text: a.text });
+  }
+
+  return {
+    reset: before.length,
+    ruleSettled: rules.settled,
+    claudeClassified: claude.classified,
+    costUsd: claude.costUsd,
+    flips,
+    stayed,
+    errors: claude.errors,
+  };
 }

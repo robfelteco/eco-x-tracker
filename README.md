@@ -34,3 +34,91 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+---
+
+## Operations
+
+### One-off scripts
+
+All scripts run with Node's native TS stripping — no build step:
+
+```bash
+node --env-file=.env scripts/<name>.ts
+```
+
+| Script | What it does |
+|---|---|
+| `ingest-articles.ts` | Seeds the `articles` registry from the blog PDFs on disk (`~/Desktop/Product Blogs`, `~/Desktop/Thought Leadership Blogs`). Parses title, standfirst, author, date and canonical URL off page 1 — deterministic, no LLM. Requires `pdftotext` (poppler). |
+| `backfill-articles.ts` | Ties existing posts to the article they amplify. Deterministic rungs (blog URL, X-article card, anchor post) are free; `--no-claude` skips the paid content-match rung. |
+| `backfill-dimensions.ts` | Recomputes `chains` / `entities` / `products` / `shape` on every post using the same extractor as ingest. |
+| `reclassify.ts <template>…` | Re-decides a pillar against the CURRENT taxonomy descriptions. Auto-applies; prints everything that moved. Run after redefining a pillar. |
+| `seed-quote-roster.ts` | Seeds `orgs` / `people` / `watch_sources` for quote discovery. Idempotent — operator edits survive a re-run. |
+
+### Why articles are a first-class table
+
+`@eco` publishes a piece once and then re-amplifies it for weeks, linking not to
+the article but to the **@eco status that carried it**. Before Migration 006 the
+shelf read each of those amplifications as a separate article, so a piece already
+run five times looked like five fresh options. `posts.article_id` collapses them,
+and `article_match` records which rung of the ladder decided it
+(`url` → `xurl` → `anchor` → `claude` → `human`). Attribution re-runs on every
+sync; human labels are never overwritten.
+
+### Quote discovery
+
+The Quote Card pillar has nothing to re-run — a quote card is used once — so its
+expanded section is a discovery pipeline rather than a shelf. See
+`db/schema.sql` Migration 007 and `lib/quoteDiscovery.ts`.
+
+Runs are async by lane: `/api/quotes/run` enqueues, `/api/quotes/lane` executes
+one lane, `/api/quotes/status` polls. Lanes are split because a Gemini pass over
+a 90-minute podcast takes minutes and would blow a serverless duration limit —
+and because partial results are genuinely useful (you can work the X lane while
+YouTube is still transcribing).
+
+**The verbatim gate is non-negotiable.** Every candidate is string-matched back
+against the persisted source before it can reach the queue. A paraphrase scores
+`failed` and never appears. A near-match scores `fuzzy`, is flagged
+"listen back", and cannot be auto-approved.
+
+### The YouTube lane and the fabricated-transcript problem
+
+The lane works, but getting there surfaced a failure mode worth documenting,
+because nothing downstream can catch it.
+
+**A model that cannot read the video will still return a plausible transcript.**
+Observed for real: `gemini-2.5-flash` ACCEPTS a YouTube `fileUri` (a malformed
+one 400s, so the part is genuinely parsed), contributes ZERO tokens from it, and
+invents an interview out of the participant name. Two identical calls fabricated
+two different openings, one naming a person unconnected to the video.
+
+Verification (§9) cannot catch this. It checks a quote against the transcript,
+and here the transcript is the fabricated artifact — the check is circular. So
+the gate lives at ingestion instead, in `transcribeVideo()`:
+
+- `usageMetadata.promptTokenCount` below 2000 → `VideoNotIngestedError`. Even a
+  few minutes of low-resolution audio costs thousands of prompt tokens; a couple
+  of hundred means only the text prompt was read.
+- every segment stamped at `0s` → `VideoNotIngestedError`. That is the shape a
+  fabricated transcript takes, and it also means no deep link could land.
+
+Either one aborts the lane and marks it **failed** — deliberately not "complete
+with 0 results", which would read as a quiet day.
+
+**Capacity, not permissions.** Video-capable models return `503 UNAVAILABLE`
+("experiencing high demand") readily — on a 12-minute clip as often as a
+72-minute one. So `gemini()` retries transient statuses (429/500/502/503/504)
+with backoff and then falls through `GEMINI_VIDEO_FALLBACKS`. Without that a
+single spike fails the whole lane; with it, transcription succeeds.
+
+**Timestamps drift long.** On a 724-second clip the model returned segments
+stamped out to 1118s — 54% past the end, which would send every deep link past
+the end of the video. `transcribeVideo()` rescales proportionally when the
+overrun is systematic, then clamps to the real duration.
+
+**Coverage is uneven by design.****Coverage is uneven by design.** The official X API's recent search reaches back
+7 days only and full-archive is Enterprise-only, so X is the shallow-but-recent
+lane (historical depth comes from paginating roster timelines with a persisted
+`since_id`). YouTube and published reports carry the historical recall. The UI
+shows per-lane status rather than one undifferentiated list so this is visible.

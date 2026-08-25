@@ -1,5 +1,5 @@
-import { sql } from "./db";
-import { fetchArticleCard, fetchQuotedImage } from "./twitter";
+import { sql } from "./db.ts";
+import { fetchArticleCard, fetchQuotedImage } from "./twitter.ts";
 
 /**
  * Link-preview enrichment.

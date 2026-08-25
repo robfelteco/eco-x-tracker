@@ -1,6 +1,6 @@
-import { sql } from "./db";
-import { TEMPLATE_BY_ID, type Template } from "./taxonomy";
-import { chainLabel } from "./dimensions";
+import { sql } from "./db.ts";
+import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
+import { chainLabel } from "./dimensions.ts";
 
 // The recursion loop's data layer. See db/schema.sql Migration 005 for the
 // full rationale. Three moves:

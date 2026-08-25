@@ -1,4 +1,4 @@
-import { ECO_PRODUCT_TERMS, type Template } from "./taxonomy";
+import { ECO_PRODUCT_TERMS, type Template } from "./taxonomy.ts";
 
 // Stage-1 deterministic classification. Cheap, runs before any Claude call.
 // A rule only SETTLES a post when the signal is unambiguous (high confidence);

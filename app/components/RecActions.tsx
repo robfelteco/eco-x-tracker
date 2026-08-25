@@ -2,25 +2,54 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { QuoteDiscovery } from "./QuoteDiscovery";
 
-// One unified action surface per recommendation. Replaces the old
-// CopyGenerator + standalone chain-dropdown + always-on Mark-as-used. Robert's
-// redesign:
-//   - You pick WHAT to draft from (any chain, any TL article, any discovered
+// One unified action surface per recommendation.
+//
+//   - You pick WHAT to draft from (a chain, a product, an article, a discovered
 //     piece) — not just the single suggestion.
 //   - Draft copy first; only after you draft AND pick an option does "Mark as
 //     used" appear, bound to that exact target + angle.
-//   - Broad-educational never reshares, so instead of "post this again" it
-//     shows what worked + a Discover button that finds fresh source material.
+//   - The mode comes from the pillar's declared draftMode, so Quote Card and
+//     Product Posts no longer inherit chain angles they have no business having.
+//   - Product Posts is two-level: pick the product, then the piece behind it.
+//     Shapes ride along so you can see which angle that product has gone cold on.
+
+export type DraftMode = "chains" | "products" | "articles" | "discovery" | "generic";
+
+export interface ShapeUse {
+  shape: string;
+  label: string;
+  count: number;
+  daysSince: number | null;
+  medianImpr: number | null;
+}
 
 export interface Target {
   key: string;
   label: string;
   sublabel?: string;
   chain?: string | null;
+  product?: string | null;
+  articleId?: number | null;
   basePostText?: string | null;
   angle?: string | null;
   href?: string | null;
+  useCount?: number;
+  // Every post that has already used this article. Handed to the drafter with
+  // an explicit "these angles are spent" instruction — the whole point of
+  // grouping by article is that iteration N+1 should not repeat iterations 1..N.
+  priorTexts?: string[];
+}
+
+export interface ProductGroup {
+  key: string;
+  product: string;
+  label: string;
+  sublabel?: string;
+  readiness: string;
+  shapes: ShapeUse[];
+  targets: Target[];
 }
 
 export interface BroadEdData {
@@ -46,14 +75,16 @@ export function RecActions({
   score,
   mode,
   targets = [],
+  products = [],
   broad,
   recDrivenCount = 0,
   recDrivenVsBaseline = null,
 }: {
   template: string;
   score: number;
-  mode: "chains" | "articles" | "broad" | "generic";
+  mode: DraftMode;
   targets?: Target[];
+  products?: ProductGroup[];
   broad?: BroadEdData;
   recDrivenCount?: number;
   recDrivenVsBaseline?: number | null;
@@ -61,7 +92,7 @@ export function RecActions({
   const router = useRouter();
   const [, startTransition] = useTransition();
 
-  // Discover (broad mode) — fetched candidates become extra targets.
+  // Discover (broad-educational lane) — fetched candidates become extra targets.
   const [discovered, setDiscovered] = useState<Target[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [discoverErr, setDiscoverErr] = useState<string | null>(null);
@@ -74,24 +105,37 @@ export function RecActions({
   const [errByKey, setErrByKey] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<{ key: string; idx: number } | null>(null);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [shapeByKey, setShapeByKey] = useState<Record<string, string>>({});
 
-  // Mark-as-used state.
+  // Which product accordion is open (products mode).
+  const [openProduct, setOpenProduct] = useState<string | null>(products[0]?.key ?? null);
+
   const [marking, setMarking] = useState(false);
   const [markedKey, setMarkedKey] = useState<string | null>(null);
 
-  const allTargets = mode === "broad" ? discovered : targets;
+  const isBroadDiscovery = mode === "discovery" && template === "broad_educational";
+  const isQuoteDiscovery = mode === "discovery" && template === "quote_card";
+  const flatTargets = isBroadDiscovery ? discovered : targets;
 
-  async function draft(t: Target) {
+  async function draft(t: Target, shape?: string | null) {
     setActiveKey(t.key);
     setSelected(null);
-    if (optionsByKey[t.key]) return; // already drafted this target
     setLoadingKey(t.key);
     setErrByKey((e) => ({ ...e, [t.key]: "" }));
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ template, chain: t.chain ?? null, angle: t.angle ?? null, basePostText: t.basePostText ?? null }),
+        body: JSON.stringify({
+          template,
+          chain: t.chain ?? null,
+          product: t.product ?? null,
+          articleId: t.articleId ?? null,
+          shape: shape ?? shapeByKey[t.key] ?? null,
+          angle: t.angle ?? null,
+          basePostText: t.basePostText ?? null,
+          priorTexts: t.priorTexts ?? [],
+        }),
       });
       const data = await res.json();
       if (data.ok) setOptionsByKey((o) => ({ ...o, [t.key]: data.options ?? [] }));
@@ -122,7 +166,7 @@ export function RecActions({
         body: JSON.stringify({
           template,
           chain: t.chain ?? null,
-          angle: [t.label, opt.angle].filter(Boolean).join(" · ").slice(0, 500),
+          angle: [t.label, shapeByKey[t.key], opt.angle].filter(Boolean).join(" · ").slice(0, 500),
           scoreAtUse: score,
         }),
       });
@@ -166,9 +210,128 @@ export function RecActions({
     }
   }
 
+  function renderTarget(t: Target, shapePicker = false) {
+    const opts = optionsByKey[t.key];
+    const isActive = activeKey === t.key;
+    const isLoading = loadingKey === t.key;
+    const err = errByKey[t.key];
+    return (
+      <div key={t.key} className="rounded-xl border border-white/10 bg-white/[0.02]">
+        <div className="flex items-center gap-2 px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              {t.href ? (
+                <a href={t.href} target="_blank" rel="noreferrer" className="truncate text-sm font-medium text-white/85 hover:text-eco-lightblue">
+                  {t.label}
+                </a>
+              ) : (
+                <span className="truncate text-sm font-medium text-white/85">{t.label}</span>
+              )}
+              {t.useCount != null && t.useCount > 1 && (
+                <span
+                  className="flex-none rounded-full bg-amber-400/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
+                  title={`This piece has already been posted ${t.useCount} times — the drafter is told which angles are spent.`}
+                >
+                  {t.useCount}× used
+                </span>
+              )}
+            </div>
+            {t.sublabel && <div className="mt-0.5 truncate font-mono text-[10px] text-white/35">{t.sublabel}</div>}
+          </div>
+          <button
+            onClick={() => draft(t)}
+            disabled={isLoading}
+            className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/70 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+          >
+            {isLoading ? "Drafting…" : opts ? "Redraft" : "Draft copy"}
+          </button>
+        </div>
+
+        {shapePicker && (
+          <div className="flex flex-wrap items-center gap-1 border-t border-white/[0.06] px-3 py-1.5">
+            <span className="mr-1 font-mono text-[10px] uppercase tracking-wider text-white/25">Shape</span>
+            <button
+              onClick={() => setShapeByKey((m) => ({ ...m, [t.key]: "" }))}
+              className={`rounded-md border px-1.5 py-0.5 text-[11px] transition ${
+                !shapeByKey[t.key] ? "border-eco-lightblue/50 text-eco-lightblue" : "border-white/10 text-white/45 hover:border-white/25"
+              }`}
+            >
+              Any
+            </button>
+            {SHAPE_CHOICES.map((sh) => (
+              <button
+                key={sh.id}
+                onClick={() => setShapeByKey((m) => ({ ...m, [t.key]: sh.id }))}
+                className={`rounded-md border px-1.5 py-0.5 text-[11px] transition ${
+                  shapeByKey[t.key] === sh.id
+                    ? "border-eco-lightblue/50 text-eco-lightblue"
+                    : "border-white/10 text-white/45 hover:border-white/25"
+                }`}
+              >
+                {sh.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {isActive && (opts || err) && (
+          <div className="space-y-2 border-t border-white/[0.06] px-3 pb-3 pt-2">
+            {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
+            {opts?.map((o, i) => {
+              const isSel = selected?.key === t.key && selected.idx === i;
+              return (
+                <div
+                  key={i}
+                  onClick={() => setSelected({ key: t.key, idx: i })}
+                  className={`cursor-pointer rounded-lg border p-2.5 transition ${
+                    isSel ? "border-eco-lightblue/50 bg-eco-lightblue/[0.06]" : "border-white/10 bg-white/[0.02] hover:border-white/25"
+                  }`}
+                >
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
+                      <span className={`inline-block h-2.5 w-2.5 rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
+                      {o.angle}
+                    </span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); copy(o.text, i); }}
+                      className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
+                    >
+                      {copiedIdx === i ? "Copied ✓" : "Copy"}
+                    </button>
+                  </div>
+                  <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
+                  {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
+                </div>
+              );
+            })}
+
+            {opts && selected?.key === t.key && (
+              markedKey === t.key ? (
+                <span className="inline-block rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                  Marked as used ✓ — it&apos;ll show in History
+                </span>
+              ) : (
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={() => markUsed(t, opts[selected.idx])}
+                    disabled={marking}
+                    className="rounded-full bg-eco-blue px-3.5 py-1.5 text-xs font-medium text-white transition hover:brightness-110 disabled:opacity-50"
+                  >
+                    {marking ? "Marking…" : "Mark as used"}
+                  </button>
+                  <span className="text-[11px] text-white/35">once you post this draft</span>
+                </div>
+              )
+            )}
+            {opts && opts.length > 0 && <p className="text-[10px] text-white/30">Starting points — take them to 90/10 before posting.</p>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="mt-3 border-t border-white/[0.07] pt-3">
-      {/* rec-driven signal */}
       <div className="mb-2 text-xs text-white/40">
         {recDrivenCount > 0 ? (
           <span>
@@ -182,16 +345,19 @@ export function RecActions({
         ) : (
           <span className="text-white/30">
             {mode === "chains" && "Pick a chain angle and draft copy for it."}
-            {mode === "articles" && "Pick an article and draft copy for it."}
-            {mode === "broad" && "Discover fresh source material, then draft from it. (We never reshare a piece.)"}
+            {mode === "products" && "Pick the product, then the piece behind it. Shapes show which angle has gone cold."}
+            {mode === "articles" && "One row per article, not per post — the count is how many times we've already run it."}
+            {isBroadDiscovery && "Discover fresh source material, then draft from it. (We never reshare a piece.)"}
+            {isQuoteDiscovery && "Quote cards are used once, so there is nothing to re-run — this lane finds new ones."}
             {mode === "generic" && "Draft starting copy for this pillar."}
           </span>
         )}
       </div>
 
-      {/* Broad-educational: what worked, then Discover. */}
-      {mode === "broad" && broad && <WhatWorked broad={broad} />}
-      {mode === "broad" && (
+      {isQuoteDiscovery && <QuoteDiscovery />}
+
+      {isBroadDiscovery && broad && <WhatWorked broad={broad} />}
+      {isBroadDiscovery && (
         <div className="mb-3">
           <button
             onClick={runDiscover}
@@ -208,97 +374,73 @@ export function RecActions({
         </div>
       )}
 
-      {/* Targets */}
-      <div className="space-y-1.5">
-        {allTargets.map((t) => {
-          const opts = optionsByKey[t.key];
-          const isActive = activeKey === t.key;
-          const isLoading = loadingKey === t.key;
-          const err = errByKey[t.key];
-          return (
-            <div key={t.key} className="rounded-xl border border-white/10 bg-white/[0.02]">
-              <div className="flex items-center gap-2 px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    {t.href ? (
-                      <a href={t.href} target="_blank" rel="noreferrer" className="truncate text-sm font-medium text-white/85 hover:text-eco-lightblue">
-                        {t.label}
-                      </a>
-                    ) : (
-                      <span className="truncate text-sm font-medium text-white/85">{t.label}</span>
-                    )}
-                  </div>
-                  {t.sublabel && <div className="mt-0.5 truncate font-mono text-[10px] text-white/35">{t.sublabel}</div>}
-                </div>
+      {/* Products mode — product accordion, then its pieces. */}
+      {mode === "products" && (
+        <div className="space-y-1.5">
+          {products.length === 0 && (
+            <p className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-white/40">
+              No product coverage in this window.
+            </p>
+          )}
+          {products.map((p) => {
+            const open = openProduct === p.key;
+            const cold = p.shapes.filter((sh) => sh.count === 0).slice(0, 3);
+            return (
+              <div key={p.key} className="rounded-xl border border-white/10 bg-white/[0.02]">
                 <button
-                  onClick={() => draft(t)}
-                  disabled={isLoading}
-                  className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/70 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+                  onClick={() => setOpenProduct(open ? null : p.key)}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left"
                 >
-                  {isLoading ? "Drafting…" : opts ? "Redraft" : "Draft copy"}
+                  <span className={`inline-block h-1.5 w-1.5 flex-none rounded-full ${open ? "bg-eco-lightblue" : "bg-white/25"}`} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-white/85">{p.label}</span>
+                    {p.sublabel && <span className="mt-0.5 block truncate font-mono text-[10px] text-white/35">{p.sublabel}</span>}
+                  </span>
+                  <span className="flex-none font-mono text-[10px] text-white/30">{p.targets.length} to draft from</span>
                 </button>
-              </div>
-
-              {isActive && (opts || err) && (
-                <div className="space-y-2 border-t border-white/[0.06] px-3 pb-3 pt-2">
-                  {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
-                  {opts?.map((o, i) => {
-                    const isSel = selected?.key === t.key && selected.idx === i;
-                    return (
-                      <div
-                        key={i}
-                        onClick={() => setSelected({ key: t.key, idx: i })}
-                        className={`cursor-pointer rounded-lg border p-2.5 transition ${
-                          isSel ? "border-eco-lightblue/50 bg-eco-lightblue/[0.06]" : "border-white/10 bg-white/[0.02] hover:border-white/25"
-                        }`}
-                      >
-                        <div className="mb-1 flex items-center justify-between gap-2">
-                          <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
-                            <span className={`inline-block h-2.5 w-2.5 rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
-                            {o.angle}
+                {open && (
+                  <div className="space-y-2 border-t border-white/[0.06] px-3 pb-3 pt-2">
+                    {cold.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <span className="font-mono text-[10px] uppercase tracking-wider text-white/25">Never used here</span>
+                        {cold.map((sh) => (
+                          <span key={sh.shape} className="rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-1.5 py-0.5 text-emerald-300/80">
+                            {sh.label}
                           </span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); copy(o.text, i); }}
-                            className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
-                          >
-                            {copiedIdx === i ? "Copied ✓" : "Copy"}
-                          </button>
-                        </div>
-                        <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
-                        {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
+                        ))}
                       </div>
-                    );
-                  })}
+                    )}
+                    <div className="space-y-1.5">{p.targets.map((t) => renderTarget(t, true))}</div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-                  {/* Mark as used — only once an option is selected for this target. */}
-                  {opts && selected?.key === t.key && (
-                    markedKey === t.key ? (
-                      <span className="inline-block rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                        Marked as used ✓ — it&apos;ll show in History
-                      </span>
-                    ) : (
-                      <div className="flex items-center gap-2 pt-1">
-                        <button
-                          onClick={() => markUsed(t, opts[selected.idx])}
-                          disabled={marking}
-                          className="rounded-full bg-eco-blue px-3.5 py-1.5 text-xs font-medium text-white transition hover:brightness-110 disabled:opacity-50"
-                        >
-                          {marking ? "Marking…" : "Mark as used"}
-                        </button>
-                        <span className="text-[11px] text-white/35">once you post this draft</span>
-                      </div>
-                    )
-                  )}
-                  {opts && opts.length > 0 && <p className="text-[10px] text-white/30">Starting points — take them to 90/10 before posting.</p>}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+      {/* Every other mode: a flat target list. No shape picker — the seven
+          shapes were derived from the product pillar, and offering "Partner
+          proof" on a thought-leadership article implies a job it doesn't have. */}
+      {mode !== "products" && !isQuoteDiscovery && (
+        <div className="space-y-1.5">{flatTargets.map((t) => renderTarget(t))}</div>
+      )}
     </div>
   );
 }
+
+// Mirrors PRODUCT_POST_SHAPES in lib/products.ts. Duplicated as a plain literal
+// rather than imported so this client component doesn't pull the server-side
+// product briefs (and their prompt text) into the browser bundle.
+const SHAPE_CHOICES = [
+  { id: "launch", label: "Launch" },
+  { id: "problem_mechanism", label: "Problem → mechanism" },
+  { id: "how_it_works", label: "How it works" },
+  { id: "diagram", label: "Diagram" },
+  { id: "partner_proof", label: "Partner proof" },
+  { id: "icp_objection", label: "ICP objection" },
+  { id: "article_amplifier", label: "Article amplifier" },
+];
 
 function WhatWorked({ broad }: { broad: BroadEdData }) {
   if (!broad.byType.length && !broad.topEntities.length) return null;

@@ -114,6 +114,18 @@ export function takeReadCount(): number {
   return n;
 }
 
+// Exposed for the quote-discovery lanes (lib/quoteLaneX.ts), which need field
+// sets and endpoints this module doesn't otherwise use (recent search, user
+// expansions). Callers MUST call countBilledReads() themselves — billing is
+// per resource returned, and only the call site knows how many came back.
+export async function xGet<T>(path: string, params: Record<string, string>): Promise<T> {
+  return apiGet<T>(path, params);
+}
+
+export function countBilledReads(n: number): void {
+  addBilled(n);
+}
+
 async function apiGet<T>(path: string, params: Record<string, string>, attempt = 0): Promise<T> {
   const urlBase = `${API_BASE}${path}`;
   const queryString = Object.entries(params)

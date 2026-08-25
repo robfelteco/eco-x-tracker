@@ -38,6 +38,7 @@ export function Sidebar({ reviewCount }: { reviewCount?: number }) {
       )}
       {item(`/t/other`, "Other", pathname === `/t/other`)}
       <div className="mt-3 mb-1 px-2.5 font-mono text-[10px] uppercase tracking-wider text-white/30">Data</div>
+      {item("/quotes", "Quote discovery", pathname === "/quotes")}
       {item("/history", "History", pathname === "/history")}
       {item("/posts", "All posts", pathname === "/posts")}
       {item("/review", "Review queue", pathname === "/review", reviewCount)}

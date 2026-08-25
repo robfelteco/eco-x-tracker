@@ -2,7 +2,7 @@ import {
   getInsights,
   type Recommendation,
   type Readiness,
-  type TLArticle,
+  type ArticleShelfRow,
   type BroadEdBreakdown,
 } from "@/lib/stats";
 import { getReviewCount } from "@/lib/queries";
@@ -13,7 +13,8 @@ import { Eyebrow, Badge, Thumb, Tooltip } from "@/app/components/ui";
 import { writtenDate, daysAgo, compact } from "@/lib/format";
 import { pickThumb } from "@/lib/media";
 import { METRIC_DEFS } from "@/lib/metricDefs";
-import { RecActions, type Target } from "@/app/components/RecActions";
+import { RecActions, type Target, type ProductGroup } from "@/app/components/RecActions";
+import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
 import { ExpandableCard, CollapsibleSection } from "@/app/components/Collapse";
 
 export const dynamic = "force-dynamic";
@@ -142,31 +143,57 @@ export default async function PrioritizePage({
   );
 }
 
-// Build the draftable targets + mode for a recommendation. Thought-leadership
-// rides on its article shelf; broad-educational on Discover; chain pillars on
-// their ranked chain angles; everything else gets a single generic target.
+// Build the draftable targets for a recommendation.
+//
+// The mode is now DECLARED on the pillar (TemplateDef.draftMode), not inferred.
+// It used to be `if (rec.chains.length > 0)`, which meant a single incidental
+// chain tag put Quote Card and Product Posts into chain-angle mode — Quote Card
+// has two chain-tagged posts out of twenty, Product Posts one out of thirty-six,
+// and in both cases the tag was a passing mention, not the subject.
 function buildActions(
   rec: Recommendation,
-  tlArticles: TLArticle[],
+  tlArticles: ArticleShelfRow[],
   broadEd: BroadEdBreakdown,
-): { mode: "chains" | "articles" | "broad" | "generic"; targets: Target[]; broad?: BroadEdBreakdown } {
-  if (rec.template === "thought_leadership") {
-    const targets: Target[] = tlArticles.map((a) => ({
-      key: `art-${a.id}`,
-      label: a.title.slice(0, 140),
-      sublabel: `score ${a.score} · ${compact(a.impressions)} impr · ${writtenDate(a.created_at)}${
-        mediaLabel(a.mediaType) ? ` · ${mediaLabel(a.mediaType)}` : ""
+): { mode: DraftMode; targets: Target[]; products?: ProductGroup[]; broad?: BroadEdBreakdown } {
+  const mode = TEMPLATE_BY_ID[rec.template].draftMode;
+
+  if (mode === "articles") {
+    return { mode, targets: tlArticles.map((a) => articleTarget(a)) };
+  }
+
+  if (mode === "products") {
+    // Two levels: pick the product, then the piece behind it (or an evergreen
+    // angle with no article). Shapes ride along so the drafter can be told which
+    // angle this product has gone cold on.
+    const products: ProductGroup[] = rec.products.map((p) => ({
+      key: `prod-${p.product}`,
+      product: p.product,
+      label: p.label,
+      sublabel: `${compact(p.medianImpr)} median impr · ${p.count} post${p.count === 1 ? "" : "s"} · ${
+        p.daysSince == null ? "never used" : `last ${daysAgo(p.daysSince)}`
       }`,
-      basePostText: a.title,
-      angle: "Fresh take pointing to this article",
-      href: a.url,
+      readiness: p.readiness,
+      shapes: p.shapes,
+      targets: [
+        ...p.articles.map((a) => articleTarget(a, p.product)),
+        {
+          key: `prod-${p.product}-evergreen`,
+          label: `No article — evergreen ${p.label} angle`,
+          sublabel: "Draft from the product itself, not a piece",
+          product: p.product,
+          angle: null,
+          basePostText: null,
+        },
+      ],
     }));
-    return { mode: "articles", targets };
+    return { mode, targets: [], products };
   }
-  if (rec.template === "broad_educational") {
-    return { mode: "broad", targets: [], broad: broadEd };
+
+  if (mode === "discovery") {
+    return { mode, targets: [], broad: rec.template === "broad_educational" ? broadEd : undefined };
   }
-  if (rec.chains.length > 0) {
+
+  if (mode === "chains" && rec.chains.length > 0) {
     const bestIdx = rec.chains.findIndex((c) => c.readiness !== "fresh");
     const base = rec.suggested?.link_title || rec.suggested?.text || null;
     const targets: Target[] = rec.chains.map((c, i) => ({
@@ -179,8 +206,9 @@ function buildActions(
       basePostText: base,
       angle: `${c.label} angle`,
     }));
-    return { mode: "chains", targets };
+    return { mode, targets };
   }
+
   const base = rec.suggested?.link_title || rec.suggested?.text || null;
   return {
     mode: "generic",
@@ -188,10 +216,36 @@ function buildActions(
   };
 }
 
-const ACTION_LABEL: Record<"chains" | "articles" | "broad" | "generic", string> = {
+// One shelf row -> one draftable target. The sublabel is where the re-use story
+// lives: how many times we've run it, how it did, and how long it has rested.
+function articleTarget(a: ArticleShelfRow, product?: string): Target {
+  const bits = [
+    `used ${a.useCount}×`,
+    `${compact(a.medianImpr)} median impr`,
+    a.daysSinceLastUse == null ? "never used" : `last ${daysAgo(a.daysSinceLastUse)}`,
+    a.publishedOn ? `published ${a.publishedOn}` : null,
+  ].filter(Boolean);
+  return {
+    key: a.articleId == null ? "art-unmatched" : `art-${a.articleId}`,
+    label: a.title.slice(0, 140),
+    sublabel: `score ${a.score} · ${bits.join(" · ")}`,
+    articleId: a.articleId,
+    product: product ?? a.product ?? null,
+    basePostText: a.dek || a.title,
+    angle: null,
+    href: a.canonicalUrl || a.xArticleUrl || a.posts[0]?.url || null,
+    useCount: a.useCount,
+    priorTexts: a.posts.slice(0, 6).map((p) => p.text),
+  };
+}
+
+type DraftMode = "chains" | "products" | "articles" | "discovery" | "generic";
+
+const ACTION_LABEL: Record<DraftMode, string> = {
   chains: "Pick a chain angle · draft copy",
+  products: "Pick a product · draft copy",
   articles: "Pick an article · draft copy",
-  broad: "Discover sources · draft copy",
+  discovery: "Discover sources · draft copy",
   generic: "Draft copy",
 };
 
@@ -203,12 +257,12 @@ function RecCard({
 }: {
   rec: Recommendation;
   rank: number;
-  tlArticles: TLArticle[];
+  tlArticles: ArticleShelfRow[];
   broadEd: BroadEdBreakdown;
 }) {
   const top = rank === 1 && rec.score > 0;
   const lastType = mediaLabel(rec.lastMediaType);
-  const { mode, targets, broad } = buildActions(rec, tlArticles, broadEd);
+  const { mode, targets, products, broad } = buildActions(rec, tlArticles, broadEd);
 
   // Everything above the break line — the at-a-glance read, always visible.
   const header = (
@@ -263,6 +317,7 @@ function RecCard({
         score={rec.score}
         mode={mode}
         targets={targets}
+        products={products}
         broad={broad}
         recDrivenCount={rec.recDrivenCount}
         recDrivenVsBaseline={rec.recDrivenVsBaseline}

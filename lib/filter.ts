@@ -1,4 +1,4 @@
-import type { AmpFilter, StatFilter } from "./stats";
+import type { AmpFilter, StatFilter } from "./stats.ts";
 
 // Server-safe filter parsing (no "use client"). Server components import this;
 // the FilterBar client component only renders the controls.

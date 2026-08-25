@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { taxonomyPromptBlock, isTemplate, type Template } from "./taxonomy";
-import type { RuleInput } from "./classifyRules";
-import { pickThumb, type ThumbSource } from "./media";
+import { taxonomyPromptBlock, isTemplate, type Template } from "./taxonomy.ts";
+import type { RuleInput } from "./classifyRules.ts";
+import { pickThumb, type ThumbSource } from "./media.ts";
 
 // Stage-2 classification via the Anthropic API (claude-sonnet-4-6, multimodal).
 // Model is per the project brief; it's a current model with vision + strong
@@ -127,7 +127,9 @@ function buildSystem(): string {
     "Disambiguation rules:",
     "- docs.eco.com or eco.com/docs link → dev_doc_post.",
     "- External non-Eco link with zero Eco/product mention → broad_educational.",
-    "- eco.com blog link + partner @-mention → likely integration_announcement (could be product_post).",
+    "- integration_announcement is ONLY for a new BLOCKCHAIN going live in Eco (the chain is the subject: 'Eco now supports @TRONDAO', 'Eco Routes is live on @BNBChain').",
+    "- A COMPANY/PARTNER integrating an Eco product into their own app (Para ships Permit3, LI.FI/Jumper routes through Eco, Circle Gateway raises Eco order limits) → product_post, NOT integration_announcement.",
+    "- eco.com blog link about a product or feature → product_post.",
     "- No media, no link, long essay-like text → likely thought_leadership.",
     "- Video/GIF: data animation → data_motion_visual; Eco demo/talking-head/event → short_form_video_eco or product_post (product demo).",
     "- Static image with a big pulled quote + speaker attribution → quote_card.",

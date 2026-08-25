@@ -1,5 +1,5 @@
-import { sql } from "./db";
-import { REVIEW_THRESHOLD, type Template } from "./taxonomy";
+import { sql } from "./db.ts";
+import { REVIEW_THRESHOLD, type Template } from "./taxonomy.ts";
 
 export interface PostRow {
   id: string;

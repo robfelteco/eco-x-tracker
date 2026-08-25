@@ -1,7 +1,9 @@
-import { sql } from "./db";
-import { TEMPLATE_BY_ID, type Template } from "./taxonomy";
-import { chainLabel, entityLabel } from "./dimensions";
-import { getRecDrivenPerf } from "./recUses";
+import { sql } from "./db.ts";
+import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
+import { chainLabel, entityLabel } from "./dimensions.ts";
+import { productLabel, SHAPE_BY_ID, PRODUCT_POST_SHAPES } from "./products.ts";
+import { getArticleShelf, type ArticleShelfRow } from "./articles.ts";
+import { getRecDrivenPerf } from "./recUses.ts";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
 // organic posts corrupts a template's baselines, so every stat is filterable.
@@ -237,7 +239,8 @@ export interface Recommendation extends TemplateStat {
   recDrivenCount: number; // # of posts this pillar has produced FROM a recommendation
   recDrivenVsBaseline: number | null; // rec-driven median ÷ baseline (1 = on par); null if none
   easyWin: boolean; // low-effort format worth a quick post (quote card, motion visual)
-  chains: ChainAngle[]; // best-performing chain angles for this pillar, if any
+  chains: ChainAngle[]; // best-performing chain angles — only meaningful for the chain pillar
+  products: ProductAngle[]; // Eco products this pillar has covered, ranked
   suggested: SuggestedPost | null; // the specific proven post to re-run, ≤3mo old
 }
 
@@ -265,17 +268,35 @@ export interface RecentChain {
   count: number;
 }
 
-// Thought-leadership sits on ARTICLES, not chains — Robert wants the full shelf
-// of TL pieces, ranked, each clickable to draft from. One row per TL post.
-export interface TLArticle {
-  id: string;
-  url: string;
-  title: string;
-  impressions: number | null;
-  created_at: string;
-  daysAgo: number;
-  mediaType: string;
-  score: number; // 0..100 within-pillar percentile of impressions
+// Thought Leadership and Product Posts both sit on ARTICLES, not chains — and
+// crucially on the article, not the post. @eco publishes a piece once and then
+// re-amplifies it four or five times over the following weeks; the old shelf
+// listed each of those as a separate article, which buried the one number that
+// matters when you're picking what to run: how many times have we used this
+// already, and how did those runs do? See lib/articles.ts.
+export type { ArticleShelfRow } from "./articles.ts";
+
+// How a pillar's PRODUCT coverage looks — the axis Product Posts actually
+// rotates on. (34 of 36 posts in that pillar carry no chain tag at all, which is
+// why chain angles were landing on nothing there.)
+export interface ShapeUse {
+  shape: string;
+  label: string;
+  count: number;
+  daysSince: number | null;
+  medianImpr: number | null;
+}
+
+export interface ProductAngle {
+  product: string;
+  label: string;
+  count: number;
+  lastPosted: string | null;
+  daysSince: number | null;
+  medianImpr: number | null;
+  readiness: Readiness;
+  shapes: ShapeUse[]; // every shape, used or not, so cold ones are visible
+  articles: ArticleShelfRow[]; // this product's pieces, most re-runnable first
 }
 
 // Broad-educational never reshares the same piece, so instead of "post this
@@ -311,7 +332,7 @@ export interface Insights {
   recommendations: Recommendation[];
   reAmplify: ReAmplifyPost[];
   recentChains: RecentChain[]; // chains that showed up in the feed in the last few days
-  thoughtLeadership: TLArticle[]; // full ranked shelf of TL pieces
+  thoughtLeadership: ArticleShelfRow[]; // TL shelf, ONE ROW PER ARTICLE with its aggregate
   broadEducational: BroadEdBreakdown; // what has worked in broad-educational, by approach
 }
 
@@ -387,6 +408,116 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
       readiness: readinessOf(a.daysSince, def.staleDays),
     });
     anglesByTemplate.set(a.template, list);
+  }
+
+  // Per (template, product) angle stats — the Product Posts equivalent of the
+  // chain-angle table. Posts with no product contribute no rows (unnest of an
+  // empty array), so a pillar that isn't about products simply gets none.
+  const productRows = await sql<{
+    template: Template;
+    product: string;
+    count: number;
+    lastPosted: string | null;
+    daysSince: number | null;
+    medianImpr: number | null;
+  }>`
+    WITH latest AS (
+      SELECT p.id, p.template, p.created_at, p.products, s.impressions
+      FROM posts p
+      LEFT JOIN LATERAL (
+        SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+      ) s ON true
+      WHERE p.template IS NOT NULL AND p.template <> 'other'
+        AND p.is_reply = false
+        AND (${includeAll} OR p.amplified = ${wantAmplified})
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    ),
+    exploded AS (
+      SELECT template, created_at, impressions, unnest(products) AS product FROM latest
+    )
+    SELECT template, product,
+      COUNT(*)::int AS count,
+      MAX(created_at) AS "lastPosted",
+      EXTRACT(DAY FROM now() - MAX(created_at))::int AS "daysSince",
+      ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY impressions))::int AS "medianImpr"
+    FROM exploded
+    GROUP BY template, product
+    ORDER BY "medianImpr" DESC NULLS LAST
+  `;
+
+  // Shape usage per (template, product). Feeds the "you have run problem →
+  // mechanism five times straight for this product" nudge, so the drafter can
+  // offer an angle the pillar has actually gone cold on.
+  const shapeRows = await sql<{
+    template: Template;
+    product: string;
+    shape: string;
+    count: number;
+    daysSince: number | null;
+    medianImpr: number | null;
+  }>`
+    WITH latest AS (
+      SELECT p.template, p.created_at, p.products, p.shape, s.impressions
+      FROM posts p
+      LEFT JOIN LATERAL (
+        SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+      ) s ON true
+      WHERE p.template IS NOT NULL AND p.shape IS NOT NULL
+        AND p.is_reply = false
+        AND (${includeAll} OR p.amplified = ${wantAmplified})
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    ),
+    exploded AS (
+      SELECT template, created_at, impressions, shape, unnest(products) AS product FROM latest
+    )
+    SELECT template, product, shape,
+      COUNT(*)::int AS count,
+      EXTRACT(DAY FROM now() - MAX(created_at))::int AS "daysSince",
+      ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY impressions))::int AS "medianImpr"
+    FROM exploded
+    GROUP BY template, product, shape
+  `;
+
+  // Product angles, indexed by pillar, each carrying its shape mix. Articles are
+  // attached later, once the shelves have been read.
+  const shapesByKey = new Map<string, ShapeUse[]>();
+  for (const r of shapeRows) {
+    const key = `${r.template}|${r.product}`;
+    const list = shapesByKey.get(key) ?? [];
+    list.push({
+      shape: r.shape,
+      label: SHAPE_BY_ID[r.shape]?.label ?? r.shape,
+      count: r.count,
+      daysSince: r.daysSince,
+      medianImpr: r.medianImpr,
+    });
+    shapesByKey.set(key, list);
+  }
+
+  const productsByTemplate = new Map<Template, ProductAngle[]>();
+  for (const r of productRows) {
+    const def = TEMPLATE_BY_ID[r.template];
+    const used = shapesByKey.get(`${r.template}|${r.product}`) ?? [];
+    const usedById = new Map(used.map((u) => [u.shape, u]));
+    // Every shape appears, used or not — a shape with count 0 is the signal to
+    // reach for, and it can only be that if it is actually on screen.
+    const shapes: ShapeUse[] = PRODUCT_POST_SHAPES.map(
+      (sh) => usedById.get(sh.id) ?? { shape: sh.id, label: sh.label, count: 0, daysSince: null, medianImpr: null },
+    ).sort((a, b) => a.count - b.count || (b.medianImpr ?? 0) - (a.medianImpr ?? 0));
+
+    const list = productsByTemplate.get(r.template) ?? [];
+    list.push({
+      product: r.product,
+      label: productLabel(r.product),
+      count: r.count,
+      lastPosted: r.lastPosted,
+      daysSince: r.daysSince,
+      medianImpr: r.medianImpr,
+      readiness: readinessOf(r.daysSince, def.staleDays),
+      shapes,
+      articles: [],
+    });
+    productsByTemplate.set(r.template, list);
   }
 
   // The single best proven post to re-run per pillar, from the last 3 months.
@@ -508,6 +639,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         recDrivenVsBaseline: rd?.vsBaseline ?? null,
         easyWin: EASY_WIN_TEMPLATES.has(t.template),
         chains: anglesByTemplate.get(t.template) ?? [],
+        products: productsByTemplate.get(t.template) ?? [],
         suggested: suggestedByTemplate.get(t.template) ?? null,
       };
     })
@@ -555,32 +687,40 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   `;
   for (const p of reAmplify) p.templateLabel = TEMPLATE_BY_ID[p.template].label;
 
-  // Thought-leadership shelf: every TL piece, ranked by impressions, each with a
-  // within-pillar 0..100 score and its last-posted date. Clickable to draft from.
-  const tlRows = await sql<Omit<TLArticle, "score"> & { rankPct: number }>`
-    WITH latest AS (
-      SELECT p.id, p.url, COALESCE(NULLIF(p.link_title, ''), p.text) AS title,
-             p.created_at, p.media_type AS "mediaType",
-             s.impressions,
-             EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo"
-      FROM posts p
-      LEFT JOIN LATERAL (
-        SELECT impressions FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
-      ) s ON true
-      WHERE p.template = 'thought_leadership' AND p.is_reply = false
-        AND (${includeAll} OR p.amplified = ${wantAmplified})
-        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
-    )
-    SELECT id, url, title, impressions, created_at, "mediaType", "daysAgo",
-           percent_rank() OVER (ORDER BY impressions ASC NULLS FIRST) AS "rankPct"
-    FROM latest
-    ORDER BY impressions DESC NULLS LAST
-    LIMIT 20
-  `;
-  const thoughtLeadership: TLArticle[] = tlRows.map((r) => {
-    const { rankPct, ...rest } = r;
-    return { ...rest, score: Math.round((rankPct ?? 0) * 100) };
-  });
+  // Article shelves — ONE ROW PER ARTICLE, not per post. This is the change
+  // Robert asked for: the shelf was reading each re-amplification as its own
+  // article, so a piece we'd already run five times looked like five fresh
+  // options. Now each row carries the aggregate across every post that used it,
+  // plus the use count and how long it has rested (see lib/articles.ts).
+  const shelfOpts = { includeAll, wantAmplified, since: filter.since };
+  const [tlShelf, productShelf] = await Promise.all([
+    getArticleShelf(["thought_leadership"], shelfOpts),
+    getArticleShelf(["product_post"], shelfOpts),
+  ]);
+  const thoughtLeadership = tlShelf.filter((a) => a.articleId != null || a.useCount > 0);
+
+  // Hang each product's articles off its angle row. The shelves are read after
+  // the recommendations are assembled and the angle objects are shared by
+  // reference, so this fills them in place.
+  const productArticles = new Map<string, ArticleShelfRow[]>();
+  for (const a of productShelf) {
+    if (!a.product) continue;
+    const list = productArticles.get(a.product) ?? [];
+    list.push(a);
+    productArticles.set(a.product, list);
+  }
+  // Articles with no product tag (or none we could attribute) are still
+  // draftable — park them on every product-bearing pillar's first angle rather
+  // than dropping them.
+  const orphanArticles = productShelf.filter((a) => !a.product && a.articleId != null);
+  for (const list of productsByTemplate.values()) {
+    for (const pa of list) {
+      pa.articles = (productArticles.get(pa.product) ?? []).slice().sort((x, y) => y.score - x.score);
+    }
+    if (list.length && orphanArticles.length) {
+      list[0].articles = [...list[0].articles, ...orphanArticles];
+    }
+  }
 
   // Broad-educational "what worked", by approach (never reshare the same piece).
   const beTypeRows = await sql<BroadEdType>`

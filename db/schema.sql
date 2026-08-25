@@ -236,3 +236,207 @@ CREATE INDEX IF NOT EXISTS rec_uses_used_at_idx  ON recommendation_uses (used_at
 -- Never attribute the same post to two different uses.
 CREATE UNIQUE INDEX IF NOT EXISTS rec_uses_matched_uidx
   ON recommendation_uses (matched_post_id) WHERE matched_post_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Migration 006 — the ARTICLE registry.
+--
+-- Robert's finding, confirmed against the corpus: both Thought Leadership and
+-- Product Posts re-amplify the SAME underlying article over and over, and the
+-- tracker was reading every amplifier as a separate article. 16 thought-
+-- leadership posts collapse to ~10 distinct sources (five sources carry 11 of
+-- them); 28 of the 36 product posts trace back to just 7 blog articles
+-- (Verified Liquidity x6, Flash Intents x5, Programmable Addresses x5,
+-- Routes-trustless x5, Routes-hardest-problem x3, Permit3 x2, Any-to-Any x2).
+--
+-- So the article — not the post — is the unit the shelf should rank, and
+-- "how many times have we used this?" becomes a first-class number.
+--
+-- Seeded deterministically from the blog PDFs on disk (scripts/ingest-articles.ts):
+-- page 1 of every eco.com/blog print-to-PDF carries title, dek, author, date and
+-- the canonical URL in the footer. No LLM needed for the seed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS articles (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  slug           text NOT NULL UNIQUE,      -- eco.com/blog slug, or a synthetic key
+  title          text NOT NULL,
+  dek            text,                      -- the standfirst line under the headline
+  author         text,
+  published_on   date,
+  canonical_url  text,                      -- https://eco.com/blog/<slug>/
+  x_article_url  text,                      -- http://x.com/i/article/<id>, when one exists
+  -- The @eco post that CARRIED this article (the bare-link post whose link_title
+  -- is the article title). Amplifiers link at this post, not at the article URL,
+  -- so it is the join key for the anchor rung of the attribution ladder.
+  anchor_post_id text REFERENCES posts(id) ON DELETE SET NULL,
+  kind           text NOT NULL,             -- 'product' | 'thought_leadership'
+  product        text,                      -- lib/products.ts id, for product articles
+  body           text,                      -- extracted article text; feeds the drafter
+  source_file    text,                      -- the PDF this row was seeded from
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS articles_kind_idx    ON articles (kind);
+CREATE INDEX IF NOT EXISTS articles_product_idx ON articles (product);
+
+-- Which article a post is amplifying, and how we worked that out. Precedence:
+--   'url'    — canonical eco.com/blog URL matched outright
+--   'xurl'   — x.com/i/article/<id> matched articles.x_article_url
+--   'anchor' — post links at an @eco status that already resolved to an article
+--   'claude' — matched on content by the LLM, above threshold
+--   'human'  — an operator said so; never overwritten by a re-run
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS article_id         bigint REFERENCES articles(id) ON DELETE SET NULL;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS article_match      text;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS article_confidence real;
+CREATE INDEX IF NOT EXISTS posts_article_idx ON posts (article_id);
+
+-- Which Eco PRODUCT(s) a post is about. The axis Product Posts actually rotates
+-- on — 34 of 36 posts in that pillar carry no chain tag at all, so the old
+-- chain-angle targeting was landing on nothing. Extracted at ingest alongside
+-- chains/entities (lib/dimensions.ts -> lib/products.ts).
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS products text[] NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS posts_products_idx ON posts USING gin (products);
+
+-- ---------------------------------------------------------------------------
+-- Migration 007 — QUOTE DISCOVERY (see Desktop/quote-discovery-spec.md).
+--
+-- The Quote Card pillar has nothing to re-run: a quote card is used once. So its
+-- expanded section is a DISCOVERY pipeline, not a shelf. It finds usable,
+-- verbatim, attributable stablecoin quotes from credible people at credible
+-- organizations and drops them in a human review queue.
+--
+-- Precision beats recall here. A hallucinated or paraphrased quote attributed to
+-- a named executive is a brand incident, not a bug — so every candidate passes a
+-- verbatim check against the persisted source before it can reach the queue.
+-- ---------------------------------------------------------------------------
+
+-- The credibility filter. This table IS the quality control.
+CREATE TABLE IF NOT EXISTS orgs (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name          text NOT NULL UNIQUE,
+  org_tier      smallint NOT NULL,          -- 1 = TradFi/global brand, 2 = major stablecoin/fintech, 3 = crypto infra
+  is_competitor boolean NOT NULL DEFAULT false,
+  x_handle      text,
+  li_handle     text,
+  notes         text
+);
+
+CREATE TABLE IF NOT EXISTS people (
+  id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  full_name    text NOT NULL,
+  title        text NOT NULL,
+  org_id       bigint REFERENCES orgs(id) ON DELETE SET NULL,
+  seniority    smallint NOT NULL,           -- 1 = C-suite/founder, 2 = SVP/MD/Head of, 3 = Director/PM
+  x_handle     text,
+  x_author_id  text,                        -- cached forever. never re-resolve: saves $0.010/lookup.
+  li_handle    text,
+  yt_channel   text,
+  x_since_id   text,                        -- newest tweet id already fetched, per author (incremental runs)
+  handles_verified_at timestamptz,          -- handles drift; re-verify quarterly
+  active       boolean NOT NULL DEFAULT true
+);
+CREATE UNIQUE INDEX IF NOT EXISTS people_x_handle_uidx ON people (lower(x_handle)) WHERE x_handle IS NOT NULL;
+
+-- Sources we monitor that aren't tied to one person (podcasts, conference
+-- channels, report publishers, standing keyword searches).
+CREATE TABLE IF NOT EXISTS watch_sources (
+  id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  kind         text NOT NULL,               -- 'yt_channel' | 'podcast_rss' | 'report_site' | 'x_search'
+  identifier   text NOT NULL,               -- channel id, rss url, domain, or search query
+  label        text NOT NULL,
+  active       boolean NOT NULL DEFAULT true,
+  last_run_at  timestamptz,
+  UNIQUE (kind, identifier)
+);
+
+CREATE TABLE IF NOT EXISTS discovery_runs (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  triggered_by   text NOT NULL,
+  started_at     timestamptz NOT NULL DEFAULT now(),
+  finished_at    timestamptz,
+  status         text NOT NULL DEFAULT 'queued',   -- queued|running|partial|complete|failed
+  lookback_days  int NOT NULL DEFAULT 365,
+  budget_cents   int NOT NULL DEFAULT 500,
+  spend_cents    numeric(10,2) NOT NULL DEFAULT 0,
+  lane_status    jsonb NOT NULL DEFAULT '{}',      -- {"x":"complete","youtube":"running","web":"queued"}
+  stats          jsonb NOT NULL DEFAULT '{}',      -- per-lane docs fetched / candidates / verify failures
+  errors         jsonb NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS discovery_runs_started_idx ON discovery_runs (started_at DESC);
+
+-- Persist everything we fetch. Verification reads from here, and it stops us
+-- re-paying for the same data on the next run.
+CREATE TABLE IF NOT EXISTS raw_documents (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id         bigint REFERENCES discovery_runs(id) ON DELETE SET NULL,
+  source_kind    text NOT NULL,            -- 'x_post' | 'youtube' | 'article' | 'report'
+  source_url     text NOT NULL,
+  external_id    text,                     -- tweet id, yt video id, url hash
+  published_at   timestamptz,
+  title          text,
+  body           text NOT NULL,            -- full post text, transcript, or article text
+  segments       jsonb,                    -- [{speaker,start_sec,end_sec,text}] for diarized media
+  fetched_at     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (source_kind, external_id)
+);
+CREATE INDEX IF NOT EXISTS raw_documents_run_idx ON raw_documents (run_id);
+
+CREATE TABLE IF NOT EXISTS quote_candidates (
+  id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id            bigint REFERENCES discovery_runs(id) ON DELETE SET NULL,
+  raw_document_id   bigint REFERENCES raw_documents(id) ON DELETE CASCADE,
+  quote_text        text NOT NULL,
+  quote_hash        text NOT NULL,          -- sha256 of the normalized quote; dedupe across runs
+  speaker_name      text NOT NULL,
+  speaker_title     text,
+  org_name          text,                   -- org as stated in the source (may not be in orgs yet)
+  person_id         bigint REFERENCES people(id) ON DELETE SET NULL,
+  org_id            bigint REFERENCES orgs(id) ON DELETE SET NULL,
+  said_at           timestamptz,
+  deep_link         text NOT NULL,          -- ?t=NNN for YT, #:~:text= for web, post url for X
+  context_before    text,
+  context_after     text,
+  topic_tags        text[] NOT NULL DEFAULT '{}',
+  verification      text NOT NULL,          -- 'exact' | 'fuzzy' | 'failed'
+  score             numeric(5,2),
+  score_breakdown   jsonb,
+  pillar_tag        text,                   -- 'A' | 'B' | 'C' | 'D' (narrative pillars)
+  disqualifiers     text[] NOT NULL DEFAULT '{}',
+  status            text NOT NULL DEFAULT 'candidate',
+                    -- candidate | approved | rejected | carded | posted
+  reviewed_by       text,
+  reviewed_at       timestamptz,
+  reject_reason     text,
+  created_at        timestamptz NOT NULL DEFAULT now()
+);
+-- A quote reviewed and rejected once must never resurface. Single highest-value
+-- thing in the schema for reviewer sanity.
+CREATE UNIQUE INDEX IF NOT EXISTS quote_candidates_hash_uidx ON quote_candidates (quote_hash);
+CREATE INDEX IF NOT EXISTS quote_candidates_queue_idx ON quote_candidates (status, score DESC);
+CREATE INDEX IF NOT EXISTS quote_candidates_run_idx   ON quote_candidates (run_id);
+
+-- Names surfaced by the 7-day keyword sweep who aren't on the roster yet. The
+-- sweep is roster-DISCOVERY, not a quote source: it keeps the expensive read
+-- budget pointed at people we've already vetted.
+CREATE TABLE IF NOT EXISTS roster_suggestions (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  x_handle      text NOT NULL UNIQUE,
+  x_author_id   text,
+  display_name  text,
+  bio           text,
+  followers     integer,
+  seen_count    integer NOT NULL DEFAULT 1,
+  sample_post   text,
+  sample_url    text,
+  status        text NOT NULL DEFAULT 'new',   -- new | added | ignored
+  first_seen_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS roster_suggestions_status_idx ON roster_suggestions (status, seen_count DESC);
+
+-- Which of the seven product-post SHAPES a post takes (launch, problem →
+-- mechanism, how-it-works, diagram, partner proof, ICP objection, article
+-- amplifier). Deterministic, see detectShape() in lib/products.ts. Lets the
+-- Prioritize card say "you've run problem → mechanism five times straight for
+-- this product" instead of offering the same angle again.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS shape text;
+CREATE INDEX IF NOT EXISTS posts_shape_idx ON posts (shape);

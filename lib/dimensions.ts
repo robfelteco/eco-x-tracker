@@ -8,15 +8,21 @@
 // Kept dependency-free so both lib/ingest.ts (TS) and the backfill script can
 // import it. Extend the maps as new chains/partners show up in the feed.
 
+import { extractProducts, detectShape } from "./products.ts";
+
 export interface DimensionInput {
   text: string;
   mentions: string[]; // @handles, lowercased, no leading @
   domains: string[]; // outbound domains, lowercased
+  mediaType?: string;
+  linkTitle?: string | null;
 }
 
 export interface Dimensions {
   chains: string[]; // canonical chain ids, sorted, deduped
   entities: string[]; // canonical company/partner ids, sorted, deduped
+  products: string[]; // Eco product ids (lib/products.ts), sorted, deduped
+  shape: string; // which of the seven product-post shapes this post takes
 }
 
 // --- CHAINS ---------------------------------------------------------------
@@ -200,6 +206,15 @@ function hasToken(haystack: string, token: string): boolean {
   return !wordish(before) && !wordish(after);
 }
 
+// Does this post reference Eco at all? Gates the ambiguous product terms (see
+// ProductDef.looseTerms) so "routes" only tags Eco Routes on an Eco post.
+function mentionsEcoLoose(text: string, mentions: string[], domains: string[]): boolean {
+  if (/\beco\b/.test(text)) return true;
+  if (mentions.includes("eco") || mentions.includes("rynesaxe")) return true;
+  if (domains.some((d) => d === "eco.com" || d === "docs.eco.com")) return true;
+  return false;
+}
+
 export function extractDimensions(input: DimensionInput): Dimensions {
   const text = (input.text || "").toLowerCase();
   const mentions = (input.mentions || []).map((m) => m.toLowerCase());
@@ -219,10 +234,25 @@ export function extractDimensions(input: DimensionInput): Dimensions {
     if (tokens.some((tok) => hasToken(text, tok))) chains.add(chain);
   }
 
+  const entityList = [...entities].sort();
   return {
     chains: [...chains].sort(),
-    entities: [...entities].sort(),
+    entities: entityList,
+    products: extractProducts(text, mentionsEcoLoose(text, mentions, domains)),
+    shape: detectShape({
+      text: input.text || "",
+      mediaType: input.mediaType || "text",
+      linkTitle: input.linkTitle ?? null,
+      mentions,
+      entities: entityList,
+    }),
   };
+}
+
+// Is this @handle a blockchain we track? Used by the Stage-1 rules to tell a
+// new-chain integration apart from a partner product integration.
+export function isChainHandle(handle: string): boolean {
+  return !!CHAIN_HANDLES[handle.toLowerCase()];
 }
 
 // Display helpers (fall back to a capitalized id for anything not in the map).

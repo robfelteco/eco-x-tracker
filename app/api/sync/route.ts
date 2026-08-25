@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { runSync } from "@/lib/ingest";
 import { runRuleClassification, runClaudeClassification } from "@/lib/classify";
 import { attributeUses } from "@/lib/recUses";
+import { sql } from "@/lib/db";
+import { attributeArticles } from "@/lib/articleAttribution";
+import { makeClaudeMatcher } from "@/lib/articleMatchClaude";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,6 +42,21 @@ async function handle(req: NextRequest) {
       classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
     }
 
+    // Tie newly-ingested posts to the article they amplify. Most land on a free
+    // deterministic rung (a blog URL, an X-article card, or a link at the @eco
+    // post that carried the piece); only the leftovers cost a Claude call. This
+    // is what keeps the article shelves one-row-per-article instead of
+    // one-row-per-amplification. Best-effort — never fails the sync.
+    let articlesMatched = 0;
+    try {
+      const cost = { usd: 0 };
+      const res = await attributeArticles(sql, { claudeMatch: makeClaudeMatcher(cost) });
+      articlesMatched = Object.values(res.matched).reduce((a, b) => a + b, 0);
+      classifyErrors.push(...res.errors.slice(0, 5));
+    } catch (err) {
+      classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
+    }
+
     // Close the recursion loop: tie any open "marked as used" recommendations to
     // the @eco posts that fulfilled them (newly-classified above). Best-effort —
     // never fails the sync.
@@ -50,7 +68,12 @@ async function handle(req: NextRequest) {
     }
 
     return NextResponse.json(
-      { ...result, classified: { ruleSettled, claudeClassified, errors: classifyErrors }, attributed },
+      {
+        ...result,
+        classified: { ruleSettled, claudeClassified, errors: classifyErrors },
+        articlesMatched,
+        attributed,
+      },
       { status: result.ok ? 200 : 207 },
     );
   } catch (err) {
