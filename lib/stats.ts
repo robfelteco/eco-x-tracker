@@ -693,10 +693,12 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   // options. Now each row carries the aggregate across every post that used it,
   // plus the use count and how long it has rested (see lib/articles.ts).
   const shelfOpts = { includeAll, wantAmplified, since: filter.since };
-  const [tlShelf, productShelf] = await Promise.all([
+  const [tlShelf, productShelf, chainShelf] = await Promise.all([
     getArticleShelf(["thought_leadership"], shelfOpts),
     getArticleShelf(["product_post"], shelfOpts),
+    getArticleShelf(["integration_announcement"], shelfOpts),
   ]);
+  void chainShelf;
   const thoughtLeadership = tlShelf.filter((a) => a.articleId != null || a.useCount > 0);
 
   // Hang each product's articles off its angle row. The shelves are read after

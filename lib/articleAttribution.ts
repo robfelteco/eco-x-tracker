@@ -65,14 +65,22 @@ export interface AttributionResult {
 
 // Which pillars sit on articles at all. Chain integrations, quote cards and
 // data visuals don't, so we never spend a Claude call on them.
-export const ARTICLE_TEMPLATES = ["thought_leadership", "product_post", "broad_educational"];
+export const ARTICLE_TEMPLATES = [
+  "thought_leadership",
+  "product_post",
+  "broad_educational",
+  // Chain integrations sit on articles too — an "Eco now supports X" post is
+  // usually carried by a blog piece and then re-amplified for a fortnight. The
+  // pillar still DRAFTS on chain angles, but the reuse count is worth having.
+  "integration_announcement",
+];
 
 // …but only these two are worth a paid content-match. Broad Educational points
 // at OTHER people's articles by definition, so fanning Claude out over it would
 // spend money to confirm 60-odd nulls. It stays in ARTICLE_TEMPLATES because a
 // broad-ed post can still be the ANCHOR for one of our own pieces (the "$32
 // Trillion" essay is filed there), and the free rungs must see it.
-export const CLAUDE_MATCH_TEMPLATES = ["thought_leadership", "product_post"];
+export const CLAUDE_MATCH_TEMPLATES = ["thought_leadership", "product_post", "integration_announcement"];
 
 // Matches ONE GROUP of posts — all of which share an outbound link, and so are
 // all amplifying the same thing — against the registry, returning one answer.
