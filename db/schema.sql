@@ -363,6 +363,12 @@ CREATE TABLE IF NOT EXISTS discovery_runs (
 );
 CREATE INDEX IF NOT EXISTS discovery_runs_started_idx ON discovery_runs (started_at DESC);
 
+-- Live progress for the run in flight: which lane, which step, how far through
+-- it. A run is minutes long, so the UI needs something finer than lane_status
+-- to show between one lane finishing and the next one landing.
+-- {"lane":"youtube","step":"transcribe","done":2,"total":7,"note":"...","laneStartedAt":"..."}
+ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS progress jsonb NOT NULL DEFAULT '{}';
+
 -- Persist everything we fetch. Verification reads from here, and it stops us
 -- re-paying for the same data on the next run.
 CREATE TABLE IF NOT EXISTS raw_documents (

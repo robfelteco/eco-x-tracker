@@ -7,6 +7,7 @@ import {
 import { extractQuotes } from "./quoteExtract.ts";
 import { verifyQuote, surroundingContext, quoteHash } from "./quoteVerify.ts";
 import { scoreCandidate } from "./quoteScore.ts";
+import { LANES, DEFAULT_LANE_MS, RUN_STALE_MS, type Lane, type RunProgress } from "./quoteProgress.ts";
 
 // The discovery orchestrator (spec §3).
 //
@@ -18,8 +19,8 @@ import { scoreCandidate } from "./quoteScore.ts";
 // partial results are real — a reviewer can work the X lane while YouTube is
 // still transcribing.
 
-export type Lane = "x" | "youtube" | "web";
-export const LANES: Lane[] = ["x", "youtube", "web"];
+export { LANES };
+export type { Lane };
 
 export interface RunRow {
   id: number;
@@ -31,14 +32,16 @@ export interface RunRow {
   spendCents: number;
   laneStatus: Record<string, string>;
   stats: Record<string, unknown>;
+  progress: RunProgress | null;
   errors: string[];
 }
 
 // A run can spend real money (X bills per post read), and this app has no auth
 // yet, so an accidental double-click or a stuck client must not be able to start
 // a second paid run alongside the first. A run still moving is reused rather
-// than duplicated; one older than this is treated as abandoned.
-const RUN_STALE_MINUTES = 20;
+// than duplicated; one older than this is treated as abandoned. Shared with the
+// panel so the two can't disagree about which runs are still alive.
+const RUN_STALE_MINUTES = RUN_STALE_MS / 60_000;
 
 export class RunInProgressError extends Error {
   // Declared explicitly rather than as a constructor parameter property: Node's
@@ -71,6 +74,7 @@ export async function createRun(opts: {
     WHERE status = 'running' AND started_at <= now() - (${RUN_STALE_MINUTES} || ' minutes')::interval`;
 
   const lanes = Object.fromEntries(LANES.map((l) => [l, "queued"]));
+  // progress defaults to '{}' — a new run must not inherit the last one's step.
   const rows = await sql<{ id: number }>`
     INSERT INTO discovery_runs (triggered_by, lookback_days, budget_cents, status, lane_status)
     VALUES (${opts.triggeredBy}, ${opts.lookbackDays ?? 365}, ${opts.budgetCents ?? 500}, 'running', ${JSON.stringify(lanes)}::jsonb)
@@ -82,7 +86,7 @@ export async function getRun(id: number): Promise<RunRow | null> {
   const rows = await sql<RunRow>`
     SELECT id, status, started_at AS "startedAt", finished_at AS "finishedAt",
            lookback_days AS "lookbackDays", budget_cents AS "budgetCents",
-           spend_cents AS "spendCents", lane_status AS "laneStatus", stats, errors
+           spend_cents AS "spendCents", lane_status AS "laneStatus", stats, progress, errors
     FROM discovery_runs WHERE id = ${id}`;
   if (!rows.length) return null;
   return { ...rows[0], id: Number(rows[0].id) };
@@ -125,6 +129,58 @@ async function patchRun(
 }
 
 // ---------------------------------------------------------------------------
+// Progress reporting
+// ---------------------------------------------------------------------------
+
+// A lane is one long HTTP request, so the only way the browser can learn what
+// is happening inside it is for the lane to write it down. Each report is a
+// whole-column overwrite rather than a merge: there is exactly one thing a run
+// is doing at any moment, and a merge would leave the previous step's `done`
+// and `note` behind to be read as current.
+function makeReporter(runId: number, lane: Lane, laneStartedAt: string) {
+  let lastWrite = 0;
+  let lastStep = "";
+  return async (step: string, done?: number, total?: number, note?: string): Promise<void> => {
+    const now = Date.now();
+    // Throttle within a step — a 40-person roster shouldn't mean 40 writes a
+    // second — but never drop a step transition, which is the one the reviewer
+    // is actually waiting to see.
+    if (step === lastStep && now - lastWrite < 1000) return;
+    lastWrite = now;
+    lastStep = step;
+    const p: RunProgress = { lane, step, done, total, note: note?.slice(0, 120), at: new Date().toISOString(), laneStartedAt };
+    try {
+      await sql`UPDATE discovery_runs SET progress = ${JSON.stringify(p)}::jsonb WHERE id = ${runId}`;
+    } catch {
+      // Progress is a nicety. A run must never die because it couldn't say so.
+    }
+  };
+}
+
+// Per-lane duration learned from history, so the estimate on screen is this
+// roster's actual pace rather than a guess baked in at build time. Median, not
+// mean: one 8-minute YouTube lane shouldn't move every future estimate.
+export async function laneEtaMs(): Promise<Record<Lane, number>> {
+  const out = { ...DEFAULT_LANE_MS };
+  try {
+    const rows = await sql<{ stats: Record<string, { ms?: number }> }>`
+      SELECT stats FROM discovery_runs
+      WHERE status IN ('complete', 'partial')
+      ORDER BY started_at DESC LIMIT 8`;
+    for (const l of LANES) {
+      const xs = rows
+        .map((r) => Number(r.stats?.[l]?.ms))
+        .filter((n) => Number.isFinite(n) && n > 1000)
+        .sort((a, b) => a - b);
+      if (xs.length) out[l] = Math.round(xs[Math.floor(xs.length / 2)]);
+    }
+  } catch {
+    /* fall back to the defaults */
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Lane execution
 // ---------------------------------------------------------------------------
 
@@ -141,6 +197,9 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
   const run = await getRun(runId);
   if (!run) throw new Error(`run ${runId} not found`);
   await patchRun(runId, { lane, laneStatus: "running" });
+
+  const laneStart = Date.now();
+  const report = makeReporter(runId, lane, new Date(laneStart).toISOString());
 
   const roster = await getRoster();
   const byName = new Map(roster.map((p) => [p.fullName.toLowerCase(), p]));
@@ -159,9 +218,11 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
       // Reserve a slice of the budget for the roster-discovery sweep so the
       // roster can still grow when the timelines eat the rest.
       const sweepBudget = Math.min(50, Math.floor(run.budgetCents * 0.1));
+      await report("timelines", 0, roster.filter((p) => p.xHandle).length);
       const res = await runLaneX(roster, {
         lookbackDays: run.lookbackDays,
         budgetCents: run.budgetCents - sweepBudget,
+        onProgress: (done, total, note) => report("timelines", done, total, note),
       });
       docs = res.docs;
       spendCents += res.spendCents;
@@ -171,7 +232,9 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
       const queries = (await getWatchSources("x_search")).map((w) => w.identifier);
       if (queries.length && !partial) {
         const known = new Set(roster.map((p) => (p.xHandle ?? "").toLowerCase()).filter(Boolean));
-        const sweep = await sweepForRosterNames(queries, known, sweepBudget);
+        const sweep = await sweepForRosterNames(queries, known, sweepBudget, (done, total, note) =>
+          report("sweep", done, total, note),
+        );
         spendCents += sweep.spendCents;
         warnings.push(...sweep.warnings);
         await patchRun(runId, { stats: { rosterSuggestions: sweep.found } });
@@ -183,7 +246,9 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
         ...roster.map((p) => p.ytChannel).filter((c): c is string => !!c),
       ];
       const videos: Awaited<ReturnType<typeof listChannelUploads>> = [];
+      let listed = 0;
       for (const c of channels) {
+        await report("list", listed++, channels.length, c);
         try {
           videos.push(...(await listChannelUploads(c, sinceIso, 3)));
         } catch (err) {
@@ -198,7 +263,8 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
         .slice(0, 12);
       const skipped = videos.length - usable.length;
       if (skipped > 0) warnings.push(`skipped ${skipped} video(s) outside the 4min-2hr window (Shorts / very long streams)`);
-      const res = await runLaneYouTube(usable);
+      await report("transcribe", 0, usable.length);
+      const res = await runLaneYouTube(usable, (done, total, note) => report("transcribe", done, total, note));
       docs = res.docs;
       warnings.push(...res.warnings);
       partial = res.partial;
@@ -209,7 +275,9 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
       // navigation and teasers, which contain no quotable sentence.
       const sites = await getWatchSources("report_site");
       const targets: { url: string; label?: string }[] = [];
+      let mapped = 0;
       for (const s of sites) {
+        await report("map", mapped++, sites.length, s.label);
         const hub = `https://${s.identifier}`;
         try {
           const found = await mapReportHub(hub, 5);
@@ -219,7 +287,9 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
           warnings.push(`${s.label}: map failed — ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
         }
       }
-      const res = await runLaneWeb(targets.slice(0, 20));
+      const scrapeTargets = targets.slice(0, 20);
+      await report("scrape", 0, scrapeTargets.length);
+      const res = await runLaneWeb(scrapeTargets, (done, total, note) => report("scrape", done, total, note));
       docs = res.docs;
       warnings.push(...res.warnings);
       partial = res.partial;
@@ -243,7 +313,10 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
   const MAX_PER_SPEAKER = 3;
   const perSpeaker = new Map<string, number>();
 
+  await report("extract", 0, docs.length);
+  let extracted = 0;
   for (const d of docs) {
+    await report("extract", extracted++, docs.length, d.title ?? d.sourceUrl);
     const docRows = await sql<{ id: number }>`
       INSERT INTO raw_documents (run_id, source_kind, source_url, external_id, published_at, title, body, segments)
       VALUES (${runId}, ${d.sourceKind}, ${d.sourceUrl}, ${d.externalId},
@@ -334,7 +407,7 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
     lane,
     laneStatus: laneFailed ? "failed" : partial ? "partial" : "complete",
     addSpendCents: spendCents,
-    stats: { [lane]: { docs: docs.length, candidates, verifyFailed } },
+    stats: { [lane]: { docs: docs.length, candidates, verifyFailed, ms: Date.now() - laneStart } },
     errors: warnings.slice(0, 20),
   });
 

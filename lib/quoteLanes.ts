@@ -32,6 +32,10 @@ export interface LaneResult {
   failed?: boolean;
 }
 
+// Called as a lane works through its items so the run can report what it is
+// doing right now. Purely advisory — a lane never fails because reporting did.
+export type LaneProgress = (done: number, total: number, note?: string) => void | Promise<void>;
+
 // ---------------------------------------------------------------------------
 // Lane X — official API only (spec §5)
 // ---------------------------------------------------------------------------
@@ -95,7 +99,7 @@ function hasStablecoinKeyword(text: string): boolean {
 
 export async function runLaneX(
   roster: RosterPerson[],
-  opts: { lookbackDays: number; budgetCents: number },
+  opts: { lookbackDays: number; budgetCents: number; onProgress?: LaneProgress },
 ): Promise<LaneResult> {
   const warnings: string[] = [];
   const docs: LaneDoc[] = [];
@@ -122,7 +126,9 @@ export async function runLaneX(
   const startIdx = await rosterRotationOffset(people.length);
   const ordered = [...people.slice(startIdx), ...people.slice(0, startIdx)];
 
+  let seen = 0;
   for (const p of ordered) {
+    await opts.onProgress?.(seen++, ordered.length, p.fullName);
     // Abort at 90% of budget rather than overshooting (spec §5.3).
     if (spendCents >= opts.budgetCents * 0.9) {
       partial = true;
@@ -223,6 +229,7 @@ export async function runLaneX(
     }
   }
 
+  await opts.onProgress?.(ordered.length, ordered.length);
   return { docs, spendCents, warnings, partial };
 }
 
@@ -251,12 +258,15 @@ export async function sweepForRosterNames(
   queries: string[],
   knownHandles: Set<string>,
   budgetCents: number,
+  onProgress?: LaneProgress,
 ): Promise<{ found: number; spendCents: number; warnings: string[] }> {
   const warnings: string[] = [];
   let spendCents = 0;
   let found = 0;
 
+  let done = 0;
   for (const q of queries) {
+    await onProgress?.(done++, queries.length, q.slice(0, 48));
     if (spendCents >= budgetCents) break;
     try {
       const data = await xGet<{ data?: RawSearchTweet[]; includes?: { users?: RawUser[] } }>(
@@ -311,11 +321,13 @@ export interface VideoTarget {
   participants: string[];
 }
 
-export async function runLaneYouTube(videos: VideoTarget[]): Promise<LaneResult> {
+export async function runLaneYouTube(videos: VideoTarget[], onProgress?: LaneProgress): Promise<LaneResult> {
   const warnings: string[] = [];
   const docs: LaneDoc[] = [];
 
+  let done = 0;
   for (const v of videos) {
+    await onProgress?.(done++, videos.length, v.title ?? v.videoId);
     try {
       const segments = await transcribeVideo(v.url, v.participants, v.durationSec);
       if (!segments.length) {
@@ -353,6 +365,7 @@ export async function runLaneYouTube(videos: VideoTarget[]): Promise<LaneResult>
       }
     }
   }
+  await onProgress?.(videos.length, videos.length);
   return { docs, spendCents: 0, warnings, partial: false };
 }
 
@@ -542,13 +555,16 @@ export async function mapReportHub(hubUrl: string, limit = 6): Promise<string[]>
 
 export async function runLaneWeb(
   targets: { url: string; label?: string }[],
+  onProgress?: LaneProgress,
 ): Promise<LaneResult> {
   const key = process.env.FIRECRAWL_API_KEY;
   const warnings: string[] = [];
   const docs: LaneDoc[] = [];
   if (!key) return { docs, spendCents: 0, warnings: ["FIRECRAWL_API_KEY is not set — web lane skipped."], partial: true };
 
+  let done = 0;
   for (const t of targets) {
+    await onProgress?.(done++, targets.length, t.label ?? t.url);
     if (/youtube\.com|youtu\.be|(^|\/\/)(x|twitter)\.com/i.test(t.url)) {
       warnings.push(`skipped ${t.url} — X and YouTube belong to their own lanes`);
       continue;
@@ -581,6 +597,7 @@ export async function runLaneWeb(
       warnings.push(`${t.url}: ${short(err)}`);
     }
   }
+  await onProgress?.(targets.length, targets.length);
   return { docs, spendCents: 0, warnings, partial: false };
 }
 
