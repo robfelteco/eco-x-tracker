@@ -7,7 +7,10 @@ import {
 import { extractQuotes } from "./quoteExtract.ts";
 import { verifyQuote, surroundingContext, quoteHash } from "./quoteVerify.ts";
 import { scoreCandidate } from "./quoteScore.ts";
-import { LANES, DEFAULT_LANE_MS, RUN_STALE_MS, type Lane, type RunProgress } from "./quoteProgress.ts";
+import {
+  LANES, DEFAULT_LANE_MS, RUN_STALE_MS, LANE_FETCH_DEADLINE_MS, LANE_HARD_DEADLINE_MS,
+  type Lane, type RunProgress,
+} from "./quoteProgress.ts";
 
 // The discovery orchestrator (spec §3).
 //
@@ -200,6 +203,8 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
 
   const laneStart = Date.now();
   const report = makeReporter(runId, lane, new Date(laneStart).toISOString());
+  const fetchDeadline = laneStart + LANE_FETCH_DEADLINE_MS;
+  const hardDeadline = laneStart + LANE_HARD_DEADLINE_MS;
 
   const roster = await getRoster();
   const byName = new Map(roster.map((p) => [p.fullName.toLowerCase(), p]));
@@ -264,7 +269,11 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
       const skipped = videos.length - usable.length;
       if (skipped > 0) warnings.push(`skipped ${skipped} video(s) outside the 4min-2hr window (Shorts / very long streams)`);
       await report("transcribe", 0, usable.length);
-      const res = await runLaneYouTube(usable, (done, total, note) => report("transcribe", done, total, note));
+      const res = await runLaneYouTube(
+        usable,
+        (done, total, note) => report("transcribe", done, total, note),
+        fetchDeadline,
+      );
       docs = res.docs;
       warnings.push(...res.warnings);
       partial = res.partial;
@@ -289,7 +298,11 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
       }
       const scrapeTargets = targets.slice(0, 20);
       await report("scrape", 0, scrapeTargets.length);
-      const res = await runLaneWeb(scrapeTargets, (done, total, note) => report("scrape", done, total, note));
+      const res = await runLaneWeb(
+        scrapeTargets,
+        (done, total, note) => report("scrape", done, total, note),
+        fetchDeadline,
+      );
       docs = res.docs;
       warnings.push(...res.warnings);
       partial = res.partial;
@@ -316,6 +329,14 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
   await report("extract", 0, docs.length);
   let extracted = 0;
   for (const d of docs) {
+    // Same reasoning as the fetch loops: better to hand back the candidates we
+    // have and say what we skipped than to be killed holding all of them. The
+    // documents are already persisted, so the next run re-extracts the rest.
+    if (Date.now() > hardDeadline) {
+      partial = true;
+      warnings.push(`Out of time with ${docs.length - extracted} source(s) not yet extracted.`);
+      break;
+    }
     await report("extract", extracted++, docs.length, d.title ?? d.sourceUrl);
     const docRows = await sql<{ id: number }>`
       INSERT INTO raw_documents (run_id, source_kind, source_url, external_id, published_at, title, body, segments)

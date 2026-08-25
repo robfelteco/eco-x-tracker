@@ -61,6 +61,14 @@ export function runIsLive(status: string | undefined, startedAt: string | null |
   return now - t < RUN_STALE_MS;
 }
 
+// The lane route's maxDuration is 300s. A lane that sails past it is killed
+// mid-flight: no status write, no error, no stats — the row just sits at
+// 'running' forever, which is exactly the hang this panel was built to explain.
+// So lanes stop STARTING new work at the soft deadline and hand back a truthful
+// partial; extraction gets the remaining margin before the hard one.
+export const LANE_FETCH_DEADLINE_MS = 215_000;
+export const LANE_HARD_DEADLINE_MS = 275_000;
+
 export interface RunProgress {
   lane: Lane;
   step: string;

@@ -321,12 +321,26 @@ export interface VideoTarget {
   participants: string[];
 }
 
-export async function runLaneYouTube(videos: VideoTarget[], onProgress?: LaneProgress): Promise<LaneResult> {
+export async function runLaneYouTube(
+  videos: VideoTarget[],
+  onProgress?: LaneProgress,
+  deadline?: number,
+): Promise<LaneResult> {
   const warnings: string[] = [];
   const docs: LaneDoc[] = [];
+  let outOfTime = false;
 
   let done = 0;
   for (const v of videos) {
+    // Transcribing a 90-minute podcast is minutes of Gemini time, so this is
+    // the loop that overruns. Never START one we can't expect to finish.
+    if (deadline && Date.now() > deadline) {
+      outOfTime = true;
+      warnings.push(
+        `Out of time with ${videos.length - done} video(s) left. They are not lost — the next run picks them up.`,
+      );
+      break;
+    }
     await onProgress?.(done++, videos.length, v.title ?? v.videoId);
     try {
       const segments = await transcribeVideo(v.url, v.participants, v.durationSec);
@@ -365,8 +379,8 @@ export async function runLaneYouTube(videos: VideoTarget[], onProgress?: LanePro
       }
     }
   }
-  await onProgress?.(videos.length, videos.length);
-  return { docs, spendCents: 0, warnings, partial: false };
+  await onProgress?.(done, videos.length);
+  return { docs, spendCents: 0, warnings, partial: outOfTime };
 }
 
 // Resolve an @handle (or a bare channel name) to a real channelId. This matters:
@@ -556,6 +570,7 @@ export async function mapReportHub(hubUrl: string, limit = 6): Promise<string[]>
 export async function runLaneWeb(
   targets: { url: string; label?: string }[],
   onProgress?: LaneProgress,
+  deadline?: number,
 ): Promise<LaneResult> {
   const key = process.env.FIRECRAWL_API_KEY;
   const warnings: string[] = [];
@@ -563,7 +578,13 @@ export async function runLaneWeb(
   if (!key) return { docs, spendCents: 0, warnings: ["FIRECRAWL_API_KEY is not set — web lane skipped."], partial: true };
 
   let done = 0;
+  let outOfTime = false;
   for (const t of targets) {
+    if (deadline && Date.now() > deadline) {
+      outOfTime = true;
+      warnings.push(`Out of time with ${targets.length - done} page(s) left. The next run picks them up.`);
+      break;
+    }
     await onProgress?.(done++, targets.length, t.label ?? t.url);
     if (/youtube\.com|youtu\.be|(^|\/\/)(x|twitter)\.com/i.test(t.url)) {
       warnings.push(`skipped ${t.url} — X and YouTube belong to their own lanes`);
@@ -597,8 +618,8 @@ export async function runLaneWeb(
       warnings.push(`${t.url}: ${short(err)}`);
     }
   }
-  await onProgress?.(targets.length, targets.length);
-  return { docs, spendCents: 0, warnings, partial: false };
+  await onProgress?.(done, targets.length);
+  return { docs, spendCents: 0, warnings, partial: outOfTime };
 }
 
 // Deep link that lands the reviewer on the sentence, where the source supports
