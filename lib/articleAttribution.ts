@@ -38,6 +38,7 @@ export interface AttributionPost {
   text: string;
   template: string | null;
   link_title: string | null;
+  created_at: string;
   urls: string[]; // every expanded/resolved outbound URL, lowercased
 }
 
@@ -47,6 +48,7 @@ export interface ArticleLite {
   title: string;
   dek: string | null;
   kind: string;
+  published_on: string | null;
   canonical_url: string | null;
   x_article_url: string | null;
   anchor_post_id: string | null;
@@ -60,6 +62,7 @@ export interface AttributionResult {
   anchorsResolved: number;
   claudeGroups: number;
   claudeCostUsd: number;
+  prePublishRejected: number; // content matches thrown out by the date guard
   errors: string[];
 }
 
@@ -106,15 +109,18 @@ export async function attributeArticles(
   // silently returns false and the whole rung goes quiet instead of erroring.
   const articles = (
     await sql<ArticleLite>`
-      SELECT id, slug, title, dek, kind, canonical_url, x_article_url, anchor_post_id, body FROM articles`
+      SELECT id, slug, title, dek, kind, to_char(published_on, 'YYYY-MM-DD') AS published_on,
+             canonical_url, x_article_url, anchor_post_id, body
+      FROM articles`
   ).map((a) => ({ ...a, id: Number(a.id) }));
   if (!articles.length) {
     return { scanned: 0, matched, unmatched: 0, anchorsResolved: 0, claudeGroups: 0, claudeCostUsd: 0,
+             prePublishRejected: 0,
              errors: ["no articles seeded — run scripts/ingest-articles.ts first"] };
   }
 
   const posts = await sql<AttributionPost>`
-    SELECT id, text, template::text AS template, link_title,
+    SELECT id, text, template::text AS template, link_title, created_at,
            COALESCE(ARRAY(SELECT lower(u->>'expanded_url') FROM jsonb_array_elements(posts.urls) u
                           WHERE u->>'expanded_url' IS NOT NULL), '{}')
              || CASE WHEN link_resolved_url IS NOT NULL THEN ARRAY[lower(link_resolved_url)] ELSE '{}'::text[] END
@@ -205,8 +211,24 @@ export async function attributeArticles(
   // The CEO-hosted articles live at x.com/rynesaxe/status/… — not in `posts`,
   // so no anchor exists. Every amplifier of one shares that URL, so we group on
   // it and spend ONE call per group. Same link ⇒ same article, always.
+  //
+  // GUARD: a post cannot be amplifying an article that did not exist yet. The
+  // model hedges at ~0.78 when it is really pattern-matching on shared Eco
+  // vocabulary, which is just over the threshold, so four generic posts got
+  // welded onto articles published 37-64 days LATER. Each one then bought its
+  // article a phantom row on the wrong pillar's shelf, with its own stale
+  // "last used" clock. Publication date is the cheap deterministic check that
+  // kills the whole class. Only the content rung is guarded — the url/xurl/
+  // anchor rungs are links, and a link cannot be coincidence.
   let claudeGroups = 0;
   let claudeCostUsd = 0;
+  let prePublishRejected = 0;
+  const byId = new Map(articles.map((a) => [a.id, a]));
+  const postDatesBeforePublish = (p: AttributionPost, articleId: number): boolean => {
+    const pub = byId.get(articleId)?.published_on;
+    if (!pub || !p.created_at) return false;
+    return new Date(p.created_at) < new Date(`${pub}T00:00:00Z`);
+  };
   const claudeTemplates = opts.claudeTemplates ?? CLAUDE_MATCH_TEMPLATES;
   const remaining = posts.filter(
     (p) => !assign.has(p.id) && (!p.template || claudeTemplates.includes(p.template)),
@@ -224,7 +246,15 @@ export async function attributeArticles(
       claudeGroups++;
       try {
         const hit = await opts.claudeMatch(group, articles);
-        if (hit) for (const p of group) assign.set(p.id, { ...hit, rung: "claude" });
+        if (hit) {
+          for (const p of group) {
+            if (postDatesBeforePublish(p, hit.articleId)) {
+              prePublishRejected++;
+              continue;
+            }
+            assign.set(p.id, { ...hit, rung: "claude" });
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         errors.push(msg.slice(0, 200));
@@ -255,6 +285,7 @@ export async function attributeArticles(
     anchorsResolved,
     claudeGroups,
     claudeCostUsd,
+    prePublishRejected,
     errors,
   };
 }

@@ -108,10 +108,18 @@ interface ShelfSqlRow {
 // Group every post in `templates` by its article. Posts with no article land in
 // one residual row (articleId null) so nothing silently disappears from the
 // shelf — an unattributed piece is still a piece you could re-run.
+//
+// `kinds` scopes the shelf to articles of a matching kind. Without it a SINGLE
+// stray post is enough to put a whole article on the wrong pillar's shelf: one
+// thought_leadership-classified post pointed at the Verified Liquidity PRODUCT
+// piece, and that piece then appeared as a Thought Leadership option. A
+// wrong-kind article is folded into the residual row rather than dropped, so
+// the "nothing silently disappears" property above still holds.
 export async function getArticleShelf(
   templates: string[],
-  opts: { includeAll: boolean; wantAmplified: boolean; since: string | null },
+  opts: { includeAll: boolean; wantAmplified: boolean; since: string | null; kinds?: string[] },
 ): Promise<ArticleShelfRow[]> {
+  const kinds = opts.kinds ?? null;
   const rows = await sql<ShelfSqlRow>`
     WITH latest AS (
       SELECT p.id, p.url, p.text, p.created_at, p.media_type, p.article_id, p.link_title,
@@ -138,26 +146,46 @@ export async function getArticleShelf(
       a.anchor_post_id                       AS "anchorPostId",
       COUNT(*)::int                          AS "useCount",
       MIN(l.created_at)                      AS "firstUsed",
-      MAX(l.created_at)                      AS "lastUsed",
-      EXTRACT(DAY FROM now() - MAX(l.created_at))::int AS "daysSinceLastUse",
+      -- Rest is a property of the ARTICLE, not of this pillar. Take the last
+      -- use across every post attributed to the piece, whatever pillar ran it
+      -- and whatever the current filters are: a piece we posted 11 days ago on
+      -- Product has not rested just because Thought Leadership last touched it
+      -- in May. Falls back to the in-shelf max for the residual row, which has
+      -- no article to look up.
+      COALESCE(
+        (SELECT MAX(p2.created_at) FROM posts p2
+          WHERE p2.article_id = a.id AND p2.is_reply = false),
+        MAX(l.created_at)
+      )                                      AS "lastUsed",
+      EXTRACT(DAY FROM now() - COALESCE(
+        (SELECT MAX(p2.created_at) FROM posts p2
+          WHERE p2.article_id = a.id AND p2.is_reply = false),
+        MAX(l.created_at)
+      ))::int                                AS "daysSinceLastUse",
       SUM(l.impressions)::int                AS "totalImpr",
       ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY l.impressions))::int AS "medianImpr",
       MAX(l.impressions)::int                AS "bestImpr",
       AVG(l.eng_rate)                        AS "avgEngRate"
     FROM latest l
     LEFT JOIN articles a ON a.id = l.article_id
+                        AND (${kinds}::text[] IS NULL OR a.kind = ANY(${kinds}))
     GROUP BY a.id, a.slug, a.title, a.dek, a.author, a.published_on, a.canonical_url,
              a.x_article_url, a.kind, a.product, a.anchor_post_id
     ORDER BY "medianImpr" DESC NULLS LAST
   `;
 
   const useRows = await sql<ArticleUse & { articleId: number | null }>`
-    SELECT p.article_id AS "articleId", p.id, p.url, p.created_at AS "createdAt",
+    SELECT a.id AS "articleId", p.id, p.url, p.created_at AS "createdAt",
            EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo",
            p.text, p.media_type AS "mediaType", s.impressions,
            (a.anchor_post_id = p.id) AS "isAnchor"
     FROM posts p
+    -- Keyed off a.id, not p.article_id, so the kind scoping above applies here
+    -- too: a wrong-kind article's posts land under the residual key exactly as
+    -- they are counted in the shelf row, instead of being counted there and
+    -- listed nowhere.
     LEFT JOIN articles a ON a.id = p.article_id
+                        AND (${kinds}::text[] IS NULL OR a.kind = ANY(${kinds}))
     LEFT JOIN LATERAL (
       SELECT impressions FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
     ) s ON true

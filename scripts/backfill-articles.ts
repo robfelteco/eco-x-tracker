@@ -42,6 +42,9 @@ console.log(`Scanned ${res.scanned} posts in article-bearing pillars.`);
 console.log(`  matched: ${Object.entries(res.matched).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`);
 console.log(`  anchors resolved: ${res.anchorsResolved}`);
 console.log(`  claude groups: ${res.claudeGroups} (cost $${cost.usd.toFixed(4)})`);
+if (res.prePublishRejected) {
+  console.log(`  rejected as pre-publication: ${res.prePublishRejected}`);
+}
 console.log(`  still unattributed: ${res.unmatched}`);
 if (res.errors.length) console.log(`  errors:\n    ${res.errors.join("\n    ")}`);
 

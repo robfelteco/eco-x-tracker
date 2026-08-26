@@ -816,10 +816,15 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   // article, so a piece we'd already run five times looked like five fresh
   // options. Now each row carries the aggregate across every post that used it,
   // plus the use count and how long it has rested (see lib/articles.ts).
+  //
+  // Each shelf is scoped to the KIND of article that pillar is actually for.
+  // A post's template is a classification and can be wrong; the article's kind
+  // is a property of the piece itself, so it is the better fence. The chain
+  // shelf takes both kinds — an "Eco now supports X" post is carried by either.
   const shelfOpts = { includeAll, wantAmplified, since: filter.since };
   const [tlShelf, productShelf, chainShelf] = await Promise.all([
-    getArticleShelf(["thought_leadership"], shelfOpts),
-    getArticleShelf(["product_post"], shelfOpts),
+    getArticleShelf(["thought_leadership"], { ...shelfOpts, kinds: ["thought_leadership"] }),
+    getArticleShelf(["product_post"], { ...shelfOpts, kinds: ["product"] }),
     getArticleShelf(["integration_announcement"], shelfOpts),
   ]);
   void chainShelf;
