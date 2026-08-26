@@ -150,6 +150,14 @@ function recencyWeight(daysSince: number | null, staleDays: number): number {
   return 1 + Math.min((daysSince - staleDays) / staleDays, 1); // overdue: 1..2
 }
 
+// "18d" / "today". Local for the same reason as short() — reason strings are
+// built server-side and stats.ts stays free of UI imports.
+function agoText(days: number | null): string {
+  if (days == null) return "never";
+  if (days <= 0) return "today";
+  return `${days}d ago`;
+}
+
 // Number formatter for reason strings (12.3k). Local so stats.ts stays free of
 // UI imports.
 function short(n: number | null): string {
@@ -198,6 +206,17 @@ function scoreParts(args: {
   return { score, reasons };
 }
 
+// One chain angle for a chain-oriented pillar. Two clocks live on this row and
+// they answer different questions:
+//
+//   count / daysSince / medianImpr  — this chain INSIDE this pillar. How often
+//     we've announced it and how those announcements performed.
+//   cover* — this chain across EVERY pillar. When the subject was last in front
+//     of the audience at all, and which pillar put it there.
+//
+// `readiness` is driven by the COVERAGE clock, not the pillar clock. A chain a
+// data-motion visual covered last week is not a cold angle just because the
+// integration pillar hasn't touched it since July.
 export interface ChainAngle {
   chain: string;
   label: string;
@@ -207,6 +226,11 @@ export interface ChainAngle {
   medianImpr: number | null;
   avgImpr: number | null;
   readiness: Readiness;
+  coverCount: number; // posts touching this chain in ANY pillar
+  coverDaysSince: number | null;
+  coverTemplate: Template | null; // pillar whose post touched it most recently
+  coverLabel: string | null; // that pillar's display label
+  coveredElsewhere: boolean; // the most recent touch came from a DIFFERENT pillar
 }
 
 // A concrete, already-published post the operator can put back out for this
@@ -393,10 +417,59 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     ORDER BY "medianImpr" DESC NULLS LAST
   `;
 
+  // Cross-pillar chain COVERAGE — grouped by chain alone, not by (template,
+  // chain). The angle table above can only see a chain through one pillar's
+  // window, which is how "New Chain Integrations — 27d stale" ended up top of
+  // the board while TRON and Robinhood had both been amplified in the previous
+  // three weeks as data-motion visuals quoting their integration articles. The
+  // pillar was stale; the subject was not, and nothing in the query could tell
+  // the difference.
+  //
+  // Returns, per chain: how many posts touched it anywhere, when the most recent
+  // one landed, and which pillar it belonged to.
+  const coverageRows = await sql<{
+    chain: string;
+    count: number;
+    lastPosted: string | null;
+    daysSince: number | null;
+    lastTemplate: Template;
+  }>`
+    WITH scoped AS (
+      SELECT p.template, p.created_at, p.chains
+      FROM posts p
+      WHERE p.template IS NOT NULL AND p.template <> 'other'
+        AND p.is_reply = false
+        AND (${includeAll} OR p.amplified = ${wantAmplified})
+        AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+    ),
+    exploded AS (
+      SELECT template, created_at, unnest(chains) AS chain FROM scoped
+    ),
+    ranked AS (
+      SELECT chain, template, created_at,
+             ROW_NUMBER() OVER (PARTITION BY chain ORDER BY created_at DESC) AS rn,
+             COUNT(*)    OVER (PARTITION BY chain) AS n,
+             MAX(created_at) OVER (PARTITION BY chain) AS last_posted
+      FROM exploded
+    )
+    SELECT chain,
+           n::int AS count,
+           last_posted AS "lastPosted",
+           EXTRACT(DAY FROM now() - last_posted)::int AS "daysSince",
+           template AS "lastTemplate"
+    FROM ranked WHERE rn = 1
+  `;
+  const coverageByChain = new Map(coverageRows.map((r) => [r.chain, r]));
+
   const anglesByTemplate = new Map<Template, ChainAngle[]>();
   for (const a of angleRows) {
     const def = TEMPLATE_BY_ID[a.template];
     const list = anglesByTemplate.get(a.template) ?? [];
+    // Coverage is a superset of the pillar's own posts, so it can only ever be
+    // as recent or more recent. Falling back to the pillar clock keeps the row
+    // sane if a chain somehow has no coverage row.
+    const cov = coverageByChain.get(a.chain);
+    const coverDaysSince = cov?.daysSince ?? a.daysSince;
     list.push({
       chain: a.chain,
       label: chainLabel(a.chain),
@@ -405,9 +478,22 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
       daysSince: a.daysSince,
       medianImpr: a.medianImpr,
       avgImpr: a.avgImpr,
-      readiness: readinessOf(a.daysSince, def.staleDays),
+      readiness: readinessOf(coverDaysSince, def.staleDays),
+      coverCount: cov?.count ?? a.count,
+      coverDaysSince,
+      coverTemplate: cov?.lastTemplate ?? null,
+      coverLabel: cov ? TEMPLATE_BY_ID[cov.lastTemplate].label : null,
+      coveredElsewhere: cov != null && cov.lastTemplate !== a.template,
     });
     anglesByTemplate.set(a.template, list);
+  }
+  // Coldest-first: an angle the audience hasn't seen in a while is the one worth
+  // reaching for. Ties broken by how well the angle performs in this pillar, so
+  // among equally-rested chains the strongest still floats up.
+  for (const list of anglesByTemplate.values()) {
+    list.sort(
+      (a, b) => (b.coverDaysSince ?? -1) - (a.coverDaysSince ?? -1) || (b.medianImpr ?? 0) - (a.medianImpr ?? 0),
+    );
   }
 
   // Per (template, product) angle stats — the Product Posts equivalent of the
@@ -612,6 +698,33 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         discounted,
       });
 
+      // A chain pillar's staleness is about the FORMAT, not the subject. When
+      // its chains have already been covered by other pillars, say so on the
+      // card and name the ones that are actually cold — otherwise "27d stale"
+      // reads as "nobody has heard about TRON in a month", which isn't true.
+      //
+      // Deliberately NOT folded into the score: we still haven't announced a new
+      // chain, and that gap is real. This makes the card honest about what the
+      // gap is, and leaves the number alone so score_at_use stays comparable
+      // against every use already logged.
+      const chainAngles = anglesByTemplate.get(t.template) ?? [];
+      if (score > 0 && TEMPLATE_BY_ID[t.template].draftMode === "chains" && chainAngles.length > 0) {
+        const warm = chainAngles.filter((c) => c.readiness === "fresh" && c.coveredElsewhere);
+        if (warm.length > 0) {
+          const named = warm
+            .slice(0, 3)
+            .map((c) => `${c.label} (${agoText(c.coverDaysSince)}, ${c.coverLabel})`)
+            .join(", ");
+          reasons.push(`Subject already warm — ${named}${warm.length > 3 ? `, +${warm.length - 3} more` : ""}`);
+        }
+        const cold = chainAngles.filter((c) => c.readiness !== "fresh");
+        reasons.push(
+          cold.length > 0
+            ? `Cold chains: ${cold.slice(0, 4).map((c) => `${c.label} (${agoText(c.coverDaysSince)})`).join(", ")}`
+            : `Every chain we've integrated has been covered recently — a NEW chain is the only fresh angle here`,
+        );
+      }
+
       // Recursive adjustment: once a pillar has ≥2 rec-driven posts, nudge its
       // score by how those posts did vs baseline. Underperformers cool off;
       // over-performers get a small boost. Only applied to a live (non-zero)
@@ -638,7 +751,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         recDrivenCount: rd?.matchedCount ?? 0,
         recDrivenVsBaseline: rd?.vsBaseline ?? null,
         easyWin: EASY_WIN_TEMPLATES.has(t.template),
-        chains: anglesByTemplate.get(t.template) ?? [],
+        chains: chainAngles,
         products: productsByTemplate.get(t.template) ?? [],
         suggested: suggestedByTemplate.get(t.template) ?? null,
       };

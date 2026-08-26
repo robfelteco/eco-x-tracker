@@ -194,18 +194,32 @@ function buildActions(
   }
 
   if (mode === "chains" && rec.chains.length > 0) {
+    // Chains arrive coldest-first (by cross-pillar coverage), so the first
+    // non-fresh row IS the best angle.
     const bestIdx = rec.chains.findIndex((c) => c.readiness !== "fresh");
     const base = rec.suggested?.link_title || rec.suggested?.text || null;
-    const targets: Target[] = rec.chains.map((c, i) => ({
-      key: `chain-${c.chain}`,
-      label: c.label,
-      sublabel: `${i === bestIdx ? "Best · " : ""}${compact(c.medianImpr)} median impr · ${
-        c.daysSince == null ? "never used" : `last ${daysAgo(c.daysSince)}`
-      }`,
-      chain: c.chain,
-      basePostText: base,
-      angle: `${c.label} angle`,
-    }));
+    const targets: Target[] = rec.chains.map((c, i) => {
+      // Two clocks, and the gap between them is the point: this pillar last
+      // announced the chain N days ago, but the audience last SAW it M days ago
+      // via whichever pillar covered it. Only worth spelling out when they
+      // differ — otherwise it's noise.
+      const cover =
+        c.coveredElsewhere && c.coverDaysSince != null
+          ? `seen ${daysAgo(c.coverDaysSince)} via ${c.coverLabel}`
+          : c.daysSince == null
+            ? "never used"
+            : `last ${daysAgo(c.daysSince)}`;
+      return {
+        key: `chain-${c.chain}`,
+        label: c.label,
+        sublabel: `${i === bestIdx ? "Best · " : ""}${compact(c.medianImpr)} median impr · announced ${
+          c.daysSince == null ? "never" : daysAgo(c.daysSince)
+        } · ${cover}`,
+        chain: c.chain,
+        basePostText: base,
+        angle: `${c.label} angle`,
+      };
+    });
     return { mode, targets };
   }
 
