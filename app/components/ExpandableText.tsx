@@ -2,9 +2,13 @@
 
 import { useState } from "react";
 
-// Click-to-expand post copy. Collapsed, it line-clamps to `lines` so rows stay
-// scannable; clicking anywhere on the text toggles the full copy open (and back)
-// right inside the table — no need to open the post on X just to read it.
+// Depth 3 of the disclosure system — click-to-expand post copy. Collapsed, it
+// line-clamps to `lines` so rows stay scannable; clicking anywhere on the text
+// toggles the full copy open (and back) right inside the table.
+//
+// It carries the same chevron as the pillar cards and lane rows, plus a "More"
+// marker, because a bare line-clamp gives a first-time reader no reason to
+// think the row is clickable at all.
 export function ExpandableText({
   text,
   lines = 2,
@@ -25,9 +29,23 @@ export function ExpandableText({
       type="button"
       onClick={() => setOpen((o) => !o)}
       title={open ? "Collapse" : "Expand full copy"}
-      className="block w-full cursor-pointer text-left text-white/80 transition hover:text-white"
+      className="group/disc flex w-full cursor-pointer items-start gap-2 rounded-md text-left text-white/80 outline-none transition hover:text-white focus-visible:ring-2 focus-visible:ring-eco-lightblue/60 motion-reduce:transition-none"
     >
-      <span className={open ? "whitespace-pre-wrap" : clamp}>{value}</span>
+      <svg
+        viewBox="0 0 12 12"
+        aria-hidden
+        className={`mt-1 h-3 w-3 flex-none transition duration-200 motion-reduce:transition-none ${
+          open ? "rotate-90 text-eco-lightblue" : "text-white/45"
+        } group-hover/disc:translate-x-[3px] group-hover/disc:text-eco-lightblue`}
+      >
+        <path d="M4 2.5 L8 6 L4 9.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <span className={`min-w-0 flex-1 ${open ? "whitespace-pre-wrap" : clamp}`}>{value}</span>
+      {!open && (
+        <span className="mt-1 flex-none font-mono text-[9px] uppercase leading-none tracking-wider text-white/25 transition-colors duration-200 group-hover/disc:text-eco-lightblue motion-reduce:transition-none">
+          More
+        </span>
+      )}
     </button>
   );
 }

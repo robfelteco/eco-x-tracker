@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { NestedDisclosure } from "@/app/components/Collapse";
 import { useRouter } from "next/navigation";
 import { QuoteDiscovery } from "./QuoteDiscovery";
 
@@ -463,27 +464,17 @@ export function RecActions({
           {lanes.map((lane) => {
             const open = openLane === lane.key;
             return (
-              <div key={lane.key} className="rounded-xl border border-white/10 bg-white/[0.02]">
-                <button
-                  onClick={() => setOpenLane(open ? null : lane.key)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left"
-                >
-                  <span className={`inline-block h-1.5 w-1.5 flex-none rounded-full ${open ? "bg-eco-lightblue" : "bg-white/25"}`} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-white/85">{lane.label}</span>
-                    {lane.sublabel && (
-                      <span className="mt-0.5 block truncate font-mono text-[10px] text-white/35">{lane.sublabel}</span>
-                    )}
-                  </span>
-                  <span className="flex-none font-mono text-[10px] text-white/30">{lane.targets.length}</span>
-                </button>
-                {open && (
-                  <div className="space-y-1.5 border-t border-white/[0.06] px-3 pb-3 pt-2">
-                    {lane.hint && <p className="text-[11px] text-white/40">{lane.hint}</p>}
-                    {lane.targets.map((t) => renderTarget(t))}
-                  </div>
-                )}
-              </div>
+              <NestedDisclosure
+                key={lane.key}
+                label={lane.label}
+                sublabel={lane.sublabel}
+                count={lane.targets.length}
+                open={open}
+                onToggle={() => setOpenLane(open ? null : lane.key)}
+              >
+                {lane.hint && <p className="text-[11px] text-white/40">{lane.hint}</p>}
+                {lane.targets.map((t) => renderTarget(t))}
+              </NestedDisclosure>
             );
           })}
         </div>
@@ -501,34 +492,26 @@ export function RecActions({
             const open = openProduct === p.key;
             const cold = p.shapes.filter((sh) => sh.count === 0).slice(0, 3);
             return (
-              <div key={p.key} className="rounded-xl border border-white/10 bg-white/[0.02]">
-                <button
-                  onClick={() => setOpenProduct(open ? null : p.key)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left"
-                >
-                  <span className={`inline-block h-1.5 w-1.5 flex-none rounded-full ${open ? "bg-eco-lightblue" : "bg-white/25"}`} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-white/85">{p.label}</span>
-                    {p.sublabel && <span className="mt-0.5 block truncate font-mono text-[10px] text-white/35">{p.sublabel}</span>}
-                  </span>
-                  <span className="flex-none font-mono text-[10px] text-white/30">{p.targets.length} to draft from</span>
-                </button>
-                {open && (
-                  <div className="space-y-2 border-t border-white/[0.06] px-3 pb-3 pt-2">
-                    {cold.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                        <span className="font-mono text-[10px] uppercase tracking-wider text-white/25">Never used here</span>
-                        {cold.map((sh) => (
-                          <span key={sh.shape} className="rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-1.5 py-0.5 text-emerald-300/80">
-                            {sh.label}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    <div className="space-y-1.5">{p.targets.map((t) => renderTarget(t, true))}</div>
+              <NestedDisclosure
+                key={p.key}
+                label={p.label}
+                sublabel={p.sublabel}
+                count={`${p.targets.length} to draft from`}
+                open={open}
+                onToggle={() => setOpenProduct(open ? null : p.key)}
+              >
+                {cold.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="font-mono text-[10px] uppercase tracking-wider text-white/25">Never used here</span>
+                    {cold.map((sh) => (
+                      <span key={sh.shape} className="rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-1.5 py-0.5 text-emerald-300/80">
+                        {sh.label}
+                      </span>
+                    ))}
                   </div>
                 )}
-              </div>
+                <div className="space-y-1.5">{p.targets.map((t) => renderTarget(t, true))}</div>
+              </NestedDisclosure>
             );
           })}
         </div>

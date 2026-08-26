@@ -458,6 +458,34 @@ function videoTarget(v: VideoShelfRow): Target & { score: number } {
   };
 }
 
+// Collapsed-row summary for a pillar card: how much is on its shelf, and
+// whether that shelf is itself split into accordions.
+function shelfSummary(
+  mode: DraftMode,
+  targets: Target[],
+  products: ProductGroup[] | undefined,
+  lanes: LaneGroup[] | undefined,
+): { count: string | undefined; nested: boolean } {
+  const prods = products ?? [];
+  const groups = lanes ?? [];
+  if (mode === "docs" || mode === "videos") {
+    const total = groups.reduce((n, l) => n + l.targets.length, 0);
+    const unit = mode === "docs" ? "pages" : "clips";
+    if (groups.length === 0) return { count: "shelf empty", nested: false };
+    return { count: `${groups.length} lanes \u00b7 ${total} ${unit}`, nested: true };
+  }
+  if (mode === "products") {
+    const total = prods.reduce((n, p) => n + p.targets.length, 0);
+    if (prods.length === 0) return { count: "no coverage", nested: false };
+    return { count: `${prods.length} products \u00b7 ${total} to draft from`, nested: true };
+  }
+  if (mode === "discovery") {
+    return { count: targets.length ? `${targets.length} sources` : "run discovery", nested: false };
+  }
+  const noun = mode === "chains" ? "angles" : mode === "articles" ? "articles" : "to draft from";
+  return { count: targets.length ? `${targets.length} ${noun}` : "nothing queued", nested: false };
+}
+
 function RecCard({
   rec,
   rank,
@@ -532,8 +560,20 @@ function RecCard({
     </div>
   );
 
+  // What is behind the click, said out loud on the collapsed row. A first-time
+  // reader shouldn't have to open a pillar to learn whether it has anything in
+  // it — or whether it nests another level of accordions inside.
+  const shelf = shelfSummary(mode, targets, products, lanes);
+
   return (
-    <ExpandableCard header={header} highlight={top} actionLabel={ACTION_LABEL[mode]}>
+    <ExpandableCard
+      header={header}
+      highlight={top}
+      actionLabel={ACTION_LABEL[mode]}
+      count={shelf.count}
+      nested={shelf.nested}
+      defaultOpen={rank === 1}
+    >
       <RecActions
         template={rec.template}
         score={rec.score}
