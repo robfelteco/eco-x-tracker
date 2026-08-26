@@ -13,7 +13,18 @@ import { Eyebrow, Badge, Thumb, Tooltip } from "@/app/components/ui";
 import { writtenDate, daysAgo, compact } from "@/lib/format";
 import { pickThumb } from "@/lib/media";
 import { METRIC_DEFS } from "@/lib/metricDefs";
-import { RecActions, type Target, type ProductGroup } from "@/app/components/RecActions";
+import {
+  RecActions,
+  type Target,
+  type ProductGroup,
+  type LaneGroup,
+  type DocsMeta,
+  type VideosMeta,
+} from "@/app/components/RecActions";
+import type { DocShelfRow, HomepagePenalty } from "@/lib/docs";
+import type { VideoShelfRow } from "@/lib/videos";
+import { ICP_DEFS } from "@/lib/icp";
+import { SERIES_DEFS } from "@/lib/videos";
 import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
 import { ExpandableCard, CollapsibleSection } from "@/app/components/Collapse";
 
@@ -54,8 +65,10 @@ export default async function PrioritizePage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const filter = parseFilter(await searchParams);
-  const [{ recommendations, reAmplify, recentChains, thoughtLeadership, broadEducational }, reviewCount] =
-    await Promise.all([getInsights(filter), getReviewCount()]);
+  const [
+    { recommendations, reAmplify, recentChains, thoughtLeadership, broadEducational, docPages, homepagePenalty, videos },
+    reviewCount,
+  ] = await Promise.all([getInsights(filter), getReviewCount()]);
 
   const dueCount = recommendations.filter((r) => r.score > 0).length;
 
@@ -101,7 +114,16 @@ export default async function PrioritizePage({
         ) : (
           <div className="mt-3 space-y-3">
             {recommendations.map((rec, i) => (
-              <RecCard key={rec.template} rec={rec} rank={i + 1} tlArticles={thoughtLeadership} broadEd={broadEducational} />
+              <RecCard
+                key={rec.template}
+                rec={rec}
+                rank={i + 1}
+                tlArticles={thoughtLeadership}
+                broadEd={broadEducational}
+                docPages={docPages}
+                homepagePenalty={homepagePenalty}
+                videos={videos}
+              />
             ))}
           </div>
         )}
@@ -154,8 +176,22 @@ function buildActions(
   rec: Recommendation,
   tlArticles: ArticleShelfRow[],
   broadEd: BroadEdBreakdown,
-): { mode: DraftMode; targets: Target[]; products?: ProductGroup[]; broad?: BroadEdBreakdown } {
+  docPages: DocShelfRow[],
+  homepagePenalty: HomepagePenalty,
+  videos: VideoShelfRow[],
+): {
+  mode: DraftMode;
+  targets: Target[];
+  products?: ProductGroup[];
+  lanes?: LaneGroup[];
+  docsMeta?: DocsMeta;
+  videosMeta?: VideosMeta;
+  broad?: BroadEdBreakdown;
+} {
   const mode = TEMPLATE_BY_ID[rec.template].draftMode;
+
+  if (mode === "docs") return { mode, targets: [], ...buildDocsLanes(docPages, homepagePenalty) };
+  if (mode === "videos") return { mode, targets: [], ...buildVideoLanes(videos) };
 
   if (mode === "articles") {
     return { mode, targets: tlArticles.map((a) => articleTarget(a)) };
@@ -253,30 +289,202 @@ function articleTarget(a: ArticleShelfRow, product?: string): Target {
   };
 }
 
-type DraftMode = "chains" | "products" | "articles" | "discovery" | "generic";
+type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "generic";
 
 const ACTION_LABEL: Record<DraftMode, string> = {
   chains: "Pick a chain angle · draft copy",
   products: "Pick a product · draft copy",
   articles: "Pick an article · draft copy",
   discovery: "Discover sources · draft copy",
+  docs: "Pick an audience + docs page · draft copy",
+  videos: "Pick a clip · draft copy",
   generic: "Draft copy",
 };
+
+// ---------------------------------------------------------------------------
+// Dev Doc Post — group the docs shelf by ICP.
+//
+// ICP and not docs section, deliberately. The section tree is how the docs site
+// is organised for a reader who already knows what they want; the operator's
+// question is "whose door haven't I knocked on", and docs.eco.com's own
+// "Solutions for [persona]" pages make ICP a real axis rather than an imposed
+// one. Reference-tier pages (endpoint tables, address registries) are dropped
+// outright — they scored 0 and listing them would just make the shelf long.
+// ---------------------------------------------------------------------------
+function buildDocsLanes(
+  pages: DocShelfRow[],
+  penalty: HomepagePenalty,
+): { lanes: LaneGroup[]; docsMeta: DocsMeta } {
+  const postable = pages.filter((p) => p.tier !== "reference" && p.docPageId != null);
+
+  const lanes: LaneGroup[] = ICP_DEFS.map((icp) => {
+    const rows = postable.filter((p) => p.icp === icp.id).sort((a, b) => b.score - a.score);
+    const used = rows.filter((r) => r.useCount > 0);
+    const lastUsed = used
+      .map((r) => r.daysSinceLastUse)
+      .filter((d): d is number => d != null)
+      .sort((a, b) => a - b)[0];
+    return {
+      key: `icp-${icp.id}`,
+      label: icp.label,
+      sublabel: [
+        `${rows.length} page${rows.length === 1 ? "" : "s"}`,
+        `${rows.filter((r) => r.useCount === 0).length} never linked`,
+        lastUsed == null ? "never posted to this audience" : `last posted ${daysAgo(lastUsed)}`,
+      ].join(" · "),
+      hint: icp.brief,
+      targets: rows.map((r) => docTarget(r)),
+    };
+  })
+    .filter((l) => l.targets.length > 0)
+    // Coldest door first: an audience with no posts at all outranks one served
+    // last week, which is the whole point of grouping this way.
+    .sort((a, b) => (b.targets[0]?.score ?? 0) - (a.targets[0]?.score ?? 0));
+
+  return {
+    lanes,
+    docsMeta: {
+      ...penalty,
+      totalPages: postable.length,
+      neverUsed: postable.filter((p) => p.useCount === 0).length,
+    },
+  };
+}
+
+function docTarget(r: DocShelfRow): Target & { score: number } {
+  const badges: NonNullable<Target["badges"]> = [];
+  if (r.tier === "hero") {
+    badges.push({ label: "Hero", tone: "good", title: "A whole post can be built around this page." });
+  }
+  if (r.useCount === 0) {
+    badges.push({ label: "Never linked", tone: "good", title: "No @eco post has ever driven to this page." });
+  }
+  return {
+    key: `doc-${r.docPageId}`,
+    label: r.title,
+    sublabel: [
+      r.section,
+      r.useCount === 0 ? "never used" : `used ${r.useCount}×`,
+      r.medianImpr != null ? `${compact(r.medianImpr)} median impr` : null,
+      r.daysSinceLastUse != null ? `last ${daysAgo(r.daysSinceLastUse)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    docPageId: r.docPageId,
+    href: r.url,
+    badges,
+    useCount: r.useCount,
+    // The drafter gets the full page body server-side; this is just the seed.
+    basePostText: r.hook ?? r.blurb,
+    angle: r.hook,
+    priorTexts: r.posts.slice(0, 6).map((p) => p.text),
+    score: r.score,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Short-Form Video — group the clip library by series.
+//
+// Series and not ICP here: the operator's first question about a 300-clip
+// library is "what kind of thing am I posting" (a Head of Product explainer, a
+// CEO podcast cut, a 101), and the ICP rides along on each row. Clips the team
+// filed under "Weak (Don't Use)" never appear at all.
+// ---------------------------------------------------------------------------
+function buildVideoLanes(videos: VideoShelfRow[]): { lanes: LaneGroup[]; videosMeta: VideosMeta } {
+  const usable = videos.filter((v) => !v.doNotUse);
+
+  const lanes: LaneGroup[] = SERIES_DEFS.map((s) => {
+    const rows = usable.filter((v) => v.series === s.id).sort((a, b) => b.score - a.score);
+    const never = rows.filter((v) => v.useCount === 0).length;
+    return {
+      key: `series-${s.id}`,
+      label: s.label,
+      sublabel: `${rows.length} clip${rows.length === 1 ? "" : "s"} · ${never} never posted`,
+      hint: s.hint,
+      // A lane of 200 clips is its own kind of unusable. The shelf is already
+      // ranked, so the tail is the least useful part of it.
+      targets: rows.slice(0, 40).map((v) => videoTarget(v)),
+    };
+  })
+    .filter((l) => l.targets.length > 0)
+    .sort((a, b) => (b.targets[0]?.score ?? 0) - (a.targets[0]?.score ?? 0));
+
+  return {
+    lanes,
+    videosMeta: {
+      total: usable.length,
+      neverPosted: usable.filter((v) => v.useCount === 0).length,
+      withFile: usable.filter((v) => v.hasFile).length,
+      withTranscript: usable.filter((v) => v.transcript).length,
+    },
+  };
+}
+
+function videoTarget(v: VideoShelfRow): Target & { score: number } {
+  const badges: NonNullable<Target["badges"]> = [];
+  if (v.useCount === 0) {
+    badges.push({ label: "Never posted", tone: "good", title: "This clip has never run on @eco." });
+  }
+  if (v.transcript) {
+    badges.push({ label: "Transcript", tone: "good", title: "The drafter can quote the speaker directly." });
+  }
+  if (v.hasFile) {
+    badges.push({ label: "File", tone: "mute", title: `In Dropbox: ${v.dropboxPath ?? "delivery folder"}` });
+  }
+  if (!v.ytVideoId) {
+    badges.push({ label: "Not on channel", tone: "warn", title: "Exists as a file only — never uploaded to YouTube." });
+  }
+  return {
+    key: `vid-${v.id}`,
+    label: v.title,
+    sublabel: [
+      v.topic,
+      v.speakerLabel,
+      v.durationSec != null ? `${v.durationSec}s` : null,
+      v.ytViews != null ? `${compact(v.ytViews)} YT views` : null,
+      v.useCount === 0 ? "never posted" : `posted ${v.useCount}×`,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    videoId: v.id,
+    href: v.ytUrl,
+    thumbUrl: v.ytThumbUrl,
+    badges,
+    useCount: v.useCount,
+    basePostText: v.hook ?? v.description,
+    angle: v.hook,
+    priorTexts: v.posts.slice(0, 6).map((p) => p.text),
+    score: v.score,
+  };
+}
 
 function RecCard({
   rec,
   rank,
   tlArticles,
   broadEd,
+  docPages,
+  homepagePenalty,
+  videos,
 }: {
   rec: Recommendation;
   rank: number;
   tlArticles: ArticleShelfRow[];
   broadEd: BroadEdBreakdown;
+  docPages: DocShelfRow[];
+  homepagePenalty: HomepagePenalty;
+  videos: VideoShelfRow[];
 }) {
   const top = rank === 1 && rec.score > 0;
   const lastType = mediaLabel(rec.lastMediaType);
-  const { mode, targets, products, broad } = buildActions(rec, tlArticles, broadEd);
+  const { mode, targets, products, lanes, docsMeta, videosMeta, broad } = buildActions(
+    rec,
+    tlArticles,
+    broadEd,
+    docPages,
+    homepagePenalty,
+    videos,
+  );
 
   // Everything above the break line — the at-a-glance read, always visible.
   const header = (
@@ -332,6 +540,9 @@ function RecCard({
         mode={mode}
         targets={targets}
         products={products}
+        lanes={lanes}
+        docsMeta={docsMeta}
+        videosMeta={videosMeta}
         broad={broad}
         recDrivenCount={rec.recDrivenCount}
         recDrivenVsBaseline={rec.recDrivenVsBaseline}

@@ -446,3 +446,121 @@ CREATE INDEX IF NOT EXISTS roster_suggestions_status_idx ON roster_suggestions (
 -- this product" instead of offering the same angle again.
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS shape text;
 CREATE INDEX IF NOT EXISTS posts_shape_idx ON posts (shape);
+
+-- ---------------------------------------------------------------------------
+-- Migration 008 — the DOCS PAGE registry (Dev Doc Post) and the VIDEO registry
+-- (Short-Form Video). Both pillars were stuck on draftMode 'generic' — a single
+-- "draft something fresh" button — because neither had a shelf of source
+-- material to rank. They do now.
+--
+-- DOCS. Every dev-doc post is built around a section of docs.eco.com. The site
+-- publishes llms.txt: a curated, section-grouped index of every page with a
+-- one-line description written by the docs team, plus an .md twin of each page.
+-- So the shelf seeds itself from the docs site and re-syncs on the normal cron —
+-- no scraping, no manual list to maintain.
+--
+-- The evidence that made this worth building: of 73 pages in llms.txt, SEVEN
+-- have ever been used in a post. And the pages we do use beat the homepage
+-- decisively — deep-linked posts run a 934 median impression, /home posts 460.
+-- The pillar's whole problem was that it kept reaching for docs.eco.com/home.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS doc_pages (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  url           text NOT NULL UNIQUE,      -- canonical https://docs.eco.com/<path>, no .md, no query
+  path          text NOT NULL,             -- /routes/integrate/cli
+  section       text NOT NULL,             -- llms.txt "## " heading this page sits under
+  title         text NOT NULL,             -- llms.txt link text
+  blurb         text,                      -- the docs team's own one-liner
+  body          text,                      -- the .md page text; feeds the drafter
+  body_fetched_at timestamptz,
+
+  -- Claude-assigned, one pass at seed. Re-run only when llms.txt changes.
+  icp           text,                      -- lib/icp.ts id — who this page is FOR
+  tier          text,                      -- 'hero' | 'supporting' | 'reference'
+  hook          text,                      -- one line: what is genuinely postable here
+  tagged_at     timestamptz,
+  tag_source    text,                      -- 'claude' | 'human'
+
+  active        boolean NOT NULL DEFAULT true,  -- false once it drops out of llms.txt
+  first_seen_at timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS doc_pages_icp_idx     ON doc_pages (icp);
+CREATE INDEX IF NOT EXISTS doc_pages_tier_idx    ON doc_pages (tier);
+CREATE INDEX IF NOT EXISTS doc_pages_section_idx ON doc_pages (section);
+
+-- Which docs page a post drove to. Deterministic for 17 of 25 existing dev-doc
+-- posts (link_resolved_url carries the URL outright); the rest are the CLI
+-- photo-posts, matched by Claude or left in the residual row.
+--   'url'    — link_resolved_url matched a doc_pages.url
+--   'claude' — matched on content, above threshold
+--   'human'  — an operator said so; never overwritten by a re-run
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS doc_page_id     bigint REFERENCES doc_pages(id) ON DELETE SET NULL;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS doc_page_match  text;
+CREATE INDEX IF NOT EXISTS posts_doc_page_idx ON posts (doc_page_id);
+
+-- ---------------------------------------------------------------------------
+-- VIDEOS. The short-form pillar had the same shape of problem and a much bigger
+-- gap: the @ecoprotocol YouTube channel holds 280 shorts; 58 have ever run on X.
+-- The shelf is the residual — clips that exist and have never been posted.
+--
+-- Two sources, deliberately merged rather than picking one:
+--   youtube — 280 clips with title, a real summary description, and view counts
+--   dropbox — the team's delivery folder: fewer clips, but it carries the file
+--             itself (download link for posting) and the human quality verdict
+--             encoded in the folder tree ("Weak (Don't Use)")
+-- A clip can come from either or both; dropbox_path/yt_video_id are both
+-- nullable and either one alone is a valid row.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS videos (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+  -- YouTube side.
+  yt_video_id    text UNIQUE,               -- null = exists in Dropbox only
+  yt_url         text,
+  yt_published_on date,
+  yt_views       integer,
+  yt_thumb_url   text,
+
+  -- Dropbox side.
+  dropbox_file_id text UNIQUE,              -- id:AbCd-_12; null = YouTube only
+  dropbox_path    text,
+  dropbox_folder  text,                     -- the delivery batch it shipped in
+  dropbox_bytes   bigint,
+
+  title          text NOT NULL,             -- YT title, else cleaned-up filename
+  description    text,                      -- YT description — a real summary, not a stub
+  transcript     text,                      -- from a sibling -transcript.txt, or Gemini on demand
+  transcript_source text,                   -- 'dropbox_txt' | 'gemini' | null
+  duration_sec   integer,
+
+  -- Claude-assigned at seed, same pass shape as doc_pages.
+  series         text,                      -- 'shah_explainer' | 'ceo_podcast' | 'brand_film' | ...
+  speaker        text,                      -- 'strao' | 'rynesaxe' | 'third_party' | null
+  icp            text,
+  topic          text,                      -- short topic label for grouping
+  hook           text,                      -- the line worth building a post around
+  tagged_at      timestamptz,
+  tag_source     text,
+
+  -- The team's own verdict, read off the Dropbox folder tree. A clip filed under
+  -- "Weak (Don't Use)" must never be recommended — that is a human judgment we
+  -- already have and should not second-guess.
+  do_not_use     boolean NOT NULL DEFAULT false,
+
+  active         boolean NOT NULL DEFAULT true,
+  first_seen_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS videos_series_idx  ON videos (series);
+CREATE INDEX IF NOT EXISTS videos_icp_idx     ON videos (icp);
+CREATE INDEX IF NOT EXISTS videos_pub_idx     ON videos (yt_published_on DESC);
+
+-- Which clip a short-form post used. Almost never deterministic — only 1 of 58
+-- posts links YouTube at all, because the video is uploaded natively to X. So
+-- this is a Claude match over a +/-14 day window on title+description vs. post
+-- text, confidence-gated, with the same 'human' precedence as everywhere else.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_id         bigint REFERENCES videos(id) ON DELETE SET NULL;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_match      text;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_confidence real;
+CREATE INDEX IF NOT EXISTS posts_video_idx ON posts (video_id);

@@ -4,6 +4,9 @@ import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
 import { chainLabel } from "./dimensions.ts";
 import { PRODUCT_BY_ID, SHAPE_BY_ID } from "./products.ts";
 import { sql } from "./db.ts";
+import { getDocPage } from "./docs.ts";
+import { getVideo, speakerLabel } from "./videos.ts";
+import { ICP_BY_ID } from "./icp.ts";
 
 // In-tool "draft starting copy" — turns a prioritized recommendation into 2-3
 // on-brand X post options the operator can take to 90/10. NOT a finished-post
@@ -42,6 +45,8 @@ export interface GenerateCopyInput {
   chain?: string | null;
   product?: string | null;
   articleId?: number | null;
+  docPageId?: number | null;
+  videoId?: number | null;
   shape?: string | null;
   angle?: string | null; // optional free-text steer from the operator
   basePostText?: string | null;
@@ -73,6 +78,10 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   const product = input.product ? PRODUCT_BY_ID[input.product] : null;
   const shape = input.shape ? SHAPE_BY_ID[input.shape] : null;
   const article = input.articleId ? await loadArticle(input.articleId) : null;
+  const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;
+  const video = input.videoId ? await getVideo(input.videoId) : null;
+  const icpId = docPage?.icp ?? video?.icp ?? null;
+  const icp = icpId ? ICP_BY_ID[icpId] : null;
 
   const priors = (input.priorTexts ?? []).filter((t) => t && t.trim().length > 20).slice(0, 6);
 
@@ -115,17 +124,70 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     // whichever angle is most obvious, which is exactly the angle already used.
     priors.length
       ? [
-          `ANGLES ALREADY SPENT — this article has been posted ${priors.length === 1 ? "once" : `${priors.length} times`} already:`,
+          `ANGLES ALREADY SPENT — this source has been posted ${priors.length === 1 ? "once" : `${priors.length} times`} already:`,
           ...priors.map((t, i) => `  ${i + 1}. ${t.replace(/\s+/g, " ").slice(0, 300)}`),
           `Do NOT re-run any of those angles, hooks, or opening lines. Find a claim in the article that none of them used.`,
-          `If the piece genuinely has no fresh angle left, say so in the rationale rather than producing a near-duplicate.`,
+          `If the source genuinely has no fresh angle left, say so in the rationale rather than producing a near-duplicate.`,
         ].join("\n")
+      : null,
+
+    // The docs page IS the post's subject. Handing over the page body is the
+    // same move that made article-backed drafts specific instead of generic:
+    // without it the drafter only knows a URL and writes infrastructure filler.
+    docPage
+      ? [
+          `DOCS PAGE this post drives to: ${docPage.url}`,
+          `  Title: ${docPage.title}   (section: ${docPage.section})`,
+          docPage.blurb ? `  What the docs team says it covers: ${docPage.blurb}` : null,
+          docPage.hook ? `  The angle worth taking: ${docPage.hook}` : null,
+          docPage.body ? `  Page content (excerpt):\n"""${docPage.body.slice(0, 6000)}"""` : null,
+          `Build the post around a SPECIFIC claim, mechanism or pain named on this page.`,
+          `Never write a generic "check out our docs" post — the whole point is that this page,`,
+          `not the docs homepage, is the destination. Deep-linked posts run roughly double the`,
+          `impressions of homepage posts, so the specificity is the strategy.`,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : null,
+
+    // For a clip the transcript is the gold: it is the speaker's own words, and
+    // the strongest short-form posts in the corpus quote or paraphrase the line
+    // the clip actually turns on rather than describing the clip from outside.
+    video
+      ? [
+          `SHORT-FORM CLIP this post is posting: "${video.title}"`,
+          video.durationSec ? `  Length: ${video.durationSec}s` : null,
+          // The LABEL, not the raw id: the id is "strao" and drafts were coming
+          // back attributing lines to "strao" rather than "@strao_".
+          video.speaker ? `  Speaker: ${speakerLabel(video.speaker)}` : null,
+          video.topic ? `  Topic: ${video.topic}` : null,
+          video.hook ? `  The moment worth building on: ${video.hook}` : null,
+          video.description ? `  Summary: ${video.description.slice(0, 900)}` : null,
+          video.transcript
+            ? `  TRANSCRIPT (the speaker's own words — quote or sharpen a line from here):\n"""${video.transcript.slice(0, 5000)}"""`
+            : null,
+          `The copy sits ABOVE the video, so it must make someone stop and play it.`,
+          `The pillar's proven shape is: a question the clip answers, then who is answering it.`,
+          `Refer to people by the exact handle given above (e.g. "@strao_", "@rynesaxe"), never by a bare id.`,
+          `Do not describe the clip from outside — lead with the idea inside it.`,
+          video.transcript
+            ? `You have the transcript, so be specific. A near-verbatim line from it is fair game.`
+            : `You do NOT have a transcript, so do not invent a quote or attribute words to anyone.`,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : null,
+
+    // Both new shelves carry an ICP on every row, so the drafter can be told who
+    // it is writing for instead of inferring it from the pillar.
+    icp
+      ? `TARGET ICP for this post: ${icp.label} (${icp.side}).\n${icp.brief}\nWrite for THIS reader specifically, not for a general crypto audience.`
       : null,
 
     shape ? `SHAPE requested: ${shape.label} — ${shape.brief}` : null,
     input.angle ? `Operator's steer: ${input.angle}` : null,
 
-    !article && input.basePostText
+    !article && !docPage && !video && input.basePostText
       ? `A proven past post in this pillar (build on its idea, don't copy it verbatim):\n"""${input.basePostText.slice(0, 800)}"""`
       : null,
 

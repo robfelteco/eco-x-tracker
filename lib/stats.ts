@@ -3,6 +3,8 @@ import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
 import { chainLabel, entityLabel } from "./dimensions.ts";
 import { productLabel, SHAPE_BY_ID, PRODUCT_POST_SHAPES } from "./products.ts";
 import { getArticleShelf, type ArticleShelfRow } from "./articles.ts";
+import { getDocShelf, getHomepagePenalty, type DocShelfRow, type HomepagePenalty } from "./docs.ts";
+import { getVideoShelf, type VideoShelfRow } from "./videos.ts";
 import { getRecDrivenPerf } from "./recUses.ts";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
@@ -358,7 +360,16 @@ export interface Insights {
   recentChains: RecentChain[]; // chains that showed up in the feed in the last few days
   thoughtLeadership: ArticleShelfRow[]; // TL shelf, ONE ROW PER ARTICLE with its aggregate
   broadEducational: BroadEdBreakdown; // what has worked in broad-educational, by approach
+  // Registry-first shelves. Unlike the article shelf these are NOT derived from
+  // posts, so their most valuable rows are the ones with no post attached: docs
+  // pages we have never linked, clips we have never run.
+  docPages: DocShelfRow[];
+  homepagePenalty: HomepagePenalty;
+  videos: VideoShelfRow[];
 }
+
+export type { DocShelfRow, HomepagePenalty } from "./docs.ts";
+export type { VideoShelfRow } from "./videos.ts";
 
 // Low-effort, high-frequency formats Jay flags as "easy wins" — a quick post
 // that doesn't need a big lift ("post a quote card, that'll take 10 minutes,
@@ -884,7 +895,25 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     topAngles: beAngleRows,
   };
 
-  return { recommendations, reAmplify, recentChains, thoughtLeadership, broadEducational };
+  // The two registry-first shelves. Read unconditionally rather than only when
+  // their pillar is on screen: both are small, and the Prioritize page renders
+  // every pillar's card at once.
+  const [docPages, homepagePenalty, videos] = await Promise.all([
+    getDocShelf(),
+    getHomepagePenalty(),
+    getVideoShelf(),
+  ]);
+
+  return {
+    recommendations,
+    reAmplify,
+    recentChains,
+    thoughtLeadership,
+    broadEducational,
+    docPages,
+    homepagePenalty,
+    videos,
+  };
 }
 
 export async function getTemplateDetail(template: Template, filter: StatFilter): Promise<TemplateDetail> {

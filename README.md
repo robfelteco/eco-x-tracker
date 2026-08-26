@@ -54,6 +54,57 @@ node --env-file=.env scripts/<name>.ts
 | `backfill-dimensions.ts` | Recomputes `chains` / `entities` / `products` / `shape` on every post using the same extractor as ingest. |
 | `reclassify.ts <template>…` | Re-decides a pillar against the CURRENT taxonomy descriptions. Auto-applies; prints everything that moved. Run after redefining a pillar. |
 | `seed-quote-roster.ts` | Seeds `orgs` / `people` / `watch_sources` for quote discovery. Idempotent — operator edits survive a re-run. |
+| `sync-docs.ts` | Rebuilds the Dev Doc shelf from `docs.eco.com/llms.txt`: upserts every page, pulls its `.md` body, attributes existing posts to a page, then tags untagged pages with an ICP + postability tier. `--no-tags` to skip the Claude pass, `--force-tags` to re-tag everything except human verdicts. |
+| `sync-videos.ts` | Rebuilds the Short-Form Video shelf: YouTube inventory, then the Dropbox manifest, then reconciliation, tagging and post-matching. `--no-tags`, `--no-match`, `--force-tags`. Idempotent — a second run is a no-op. |
+
+### The two registry-first shelves
+
+`articles` groups POSTS by the piece behind them, so a piece nobody has posted never appears. That
+is right for re-amplification and wrong for the other two source libraries, where the whole point
+is what we have *not* used yet. `doc_pages` and `videos` are therefore read registry-first — every
+row shows whether or not a post is attached, and `useCount 0` is the most valuable state, not an
+empty one.
+
+**Dev Doc Post → `doc_pages`.** Seeded from `docs.eco.com/llms.txt`, which the docs platform
+publishes and keeps current: a section-grouped index of every page with a one-line description
+written by the docs team, plus a `.md` twin of each page for the body. New docs pages therefore
+appear in the shelf on their own. Attribution is deterministic — `link_resolved_url` against
+`doc_pages.url`, after stripping Buffer's `?utm_*` and the `.md` suffix.
+
+Two judgments are stored per page. The **ICP** comes free for `/solutions/<slug>` pages (the URL
+names the persona) and from Claude otherwise. The **tier** — hero / supporting / reference — is
+what makes the shelf usable: a third of `llms.txt` is endpoint reference nobody will build a post
+around, and without a tier those rank beside the persona pages. Reference-tier rows score 0 and
+are dropped from the UI entirely.
+
+`docs.eco.com/home` is seeded as a synthetic page, hand-tiered `reference`. It is not in
+`llms.txt`, so without it the seven homepage posts would land in the residual "no page" row and
+hide the pillar's most expensive habit: homepage posts run a 460 median against 934 for a
+deep-linked section.
+
+**Short-Form Video → `videos`.** Two sources merged. YouTube supplies breadth (280 shorts with a
+real summary description and a view count); the Dropbox delivery folder supplies the file itself
+and the team's own quality verdict, which lives in the folder tree as `Weak (Don't Use)` and is
+carried through to `do_not_use` — never recommended, never re-litigated.
+
+Neither the filename nor the title reliably identifies a clip across the two sources (half the
+delivery filenames are batch labels like `2026-08-07- Shah 02`), so ingest does a cheap Dice-
+coefficient title match and `reconcileDropboxToYouTube()` settles the rest on content. Without
+that reconciliation every unmatched file becomes a second row for a clip that already exists and
+the headline number — how many clips have never been posted — inflates by a fifth.
+
+Matching a clip to the POST that used it is inference, not lookup: the video is uploaded natively
+to X, so exactly one of 58 short-form posts links the channel. A ±14-day publish window narrows
+the candidates and Claude picks within it, above a deliberately high confidence bar. Leaving a
+post unmatched is cheap; a wrong match marks an unused clip as already-posted and buries it.
+
+#### Dropbox is seeded from a manifest, not synced
+
+The deployed app cannot reach an MCP server, so the Dropbox side of the video shelf comes from
+`db/dropbox-shorts-manifest.json` — a listing captured from the Dropbox MCP server and replayed by
+`scripts/sync-videos.ts`. The cron refreshes the YouTube side only. Re-capture the manifest when
+the delivery folder changes, or add Dropbox app credentials and feed a real listing into the same
+`ingestDropboxManifest()`.
 
 ### Why articles are a first-class table
 

@@ -30,8 +30,10 @@ export function isTemplate(v: unknown): v is Template {
 //   products  — rank Eco products × their source articles (Product Posts)
 //   articles  — the article shelf, one row per underlying piece (Thought Leadership)
 //   discovery — find NEW source material; nothing to re-run (Quote Card, Broad Ed)
+//   docs      — the docs.eco.com page shelf, grouped by ICP (Dev Doc Post)
+//   videos    — the short-form clip library, grouped by series (Short-Form Video)
 //   generic   — a single "draft something fresh" target
-export type DraftMode = "chains" | "products" | "articles" | "discovery" | "generic";
+export type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "generic";
 
 export interface TemplateDef {
   id: Template;
@@ -89,7 +91,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
     label: "Dev Doc Post",
     description:
       "Posts driving to developer documentation. Signals: links to docs.eco.com, code snippets, developer-facing language. Optional sub-tag: soft_sell vs hard_sell.",
-    draftMode: "generic",
+    draftMode: "docs",
     staleDays: 14,
   },
   {
@@ -105,7 +107,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
     label: "Short-Form Video (Eco)",
     description:
       "Short-form video featuring Eco (talking-head clips, event clips, explainers where Eco is named or shown). Distinct from data_motion_visual (data animation) and from product demo videos (which are product_post).",
-    draftMode: "generic",
+    draftMode: "videos",
     staleDays: 14,
   },
   {
