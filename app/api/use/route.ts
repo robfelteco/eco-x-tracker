@@ -1,16 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createUse, dismissUse } from "@/lib/recUses";
 import { isTemplate } from "@/lib/taxonomy";
+import { auth } from "@/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // "Mark as used" from the Prioritize board — records that the operator acted on
 // a recommendation, so the next sync can attribute the resulting post back to
-// it. Writes only to our DB (no external cost), so it's safe to leave open in
-// V1 like the label route; tightens once @eco.com auth lands.
+// it. Now behind Google sign-in (middleware.ts), so `used_by` records the real
+// operator instead of the "public" placeholder V1 shipped with — which is what
+// makes per-person attribution possible on the history shelf.
 export async function POST(req: NextRequest) {
   try {
+    const sessionEmail = (await auth())?.user?.email ?? null;
     const body = await req.json();
     const { template, chain, angle, scoreAtUse, suggestedPostId, by } = body;
     if (!isTemplate(template)) {
@@ -22,7 +25,9 @@ export async function POST(req: NextRequest) {
       angle: typeof angle === "string" && angle ? angle.slice(0, 500) : null,
       scoreAtUse: typeof scoreAtUse === "number" ? Math.round(scoreAtUse) : null,
       suggestedPostId: typeof suggestedPostId === "string" && suggestedPostId ? suggestedPostId : null,
-      usedBy: typeof by === "string" && by ? by.slice(0, 120) : "public",
+      // The session is authoritative; a `by` in the body is only a fallback for
+      // callers that predate auth. Never let the client claim an identity.
+      usedBy: sessionEmail ?? (typeof by === "string" && by ? by.slice(0, 120) : "public"),
     });
     return NextResponse.json({ ok: true, id }, { status: 200 });
   } catch (err) {

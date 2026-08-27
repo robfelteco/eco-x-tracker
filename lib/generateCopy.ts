@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { spawn } from "child_process";
 import { POSITIONING_BRIEF } from "./positioning.ts";
 import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
 import { chainLabel } from "./dimensions.ts";
@@ -23,7 +24,37 @@ import { ICP_BY_ID } from "./icp.ts";
 //     instruction that those angles are burned
 //   * the requested SHAPE, so "give me the partner-proof version" is a real ask
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = process.env.COPY_MODEL || "claude-sonnet-4-6";
+
+// ---------------------------------------------------------------------------
+// Two backends, same prompt.
+//
+//   "cli" → spawn the local `claude` CLI, which authenticates with the Claude
+//           Code subscription OAuth profile in ~/.claude. Costs no API credits.
+//   "api" → the Anthropic API. Bills ANTHROPIC_API_KEY.
+//
+// Default: "api" on Vercel (no `claude` binary and no OAuth profile in a
+// serverless function — the CLI cannot work there), "cli" everywhere else. That
+// mirrors eco-carousel-app: local runs on the subscription, deploys run on the
+// key. Override either way with COPY_BACKEND=cli|api.
+//
+// Note the CLI is slower (process start + a full agent turn vs. one HTTP call)
+// and has no structured-output mode, so the JSON comes back as loose text. The
+// parse below already tolerates that — it was written for the API's occasional
+// fenced output — and the CLI path retries once with a harder instruction.
+// ---------------------------------------------------------------------------
+export type CopyBackend = "cli" | "api";
+
+function chosenBackend(): CopyBackend {
+  const b = process.env.COPY_BACKEND;
+  if (b === "cli" || b === "api") return b;
+  return process.env.VERCEL ? "api" : "cli";
+}
+
+// 300s, not 180s: the CLI retries internally before giving up, so an auth
+// failure takes ~190s to surface its real message. A tighter ceiling SIGKILLs
+// it first and reports an opaque timeout instead of "Failed to authenticate".
+const CLI_TIMEOUT_MS = Number(process.env.COPY_CLI_TIMEOUT_MS || 300_000);
 
 let _client: Anthropic | null = null;
 function client(): Anthropic {
@@ -70,6 +101,118 @@ async function loadArticle(id: number): Promise<ArticleContext | null> {
     SELECT title, dek, author, to_char(published_on, 'YYYY-MM-DD') AS "publishedOn", body
     FROM articles WHERE id = ${id}`;
   return rows[0] ?? null;
+}
+
+// --- CLI backend: spawn the local `claude` CLI (subscription auth) ---------
+//
+// `--tools ""` disables every built-in tool, which turns an agent turn into a
+// plain completion: no filesystem access, no wandering, and noticeably faster.
+// `--system-prompt` REPLACES Claude Code's own system prompt with the
+// positioning brief, so the CLI path sees exactly what the API path sends as
+// `system` rather than the brief appended to a coding agent's instructions.
+function runClaudeCli(system: string, user: string): Promise<{ text: string; costUsd: number }> {
+  const bin = process.env.CLAUDE_BIN || "claude";
+  const args = [
+    "-p",
+    "--output-format", "json",
+    "--tools", "",
+    "--system-prompt", system,
+    "--model", MODEL,
+  ];
+
+  return new Promise((resolve, reject) => {
+    // Strip the API key so the CLI falls back to subscription OAuth instead of
+    // silently billing credits — the whole point of this backend.
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    // Also drop the gateway/base-URL overrides. If the dev server was started
+    // from inside a Claude Code session, the child inherits that session's
+    // ANTHROPIC_BASE_URL and dies with an opaque "Decompression error:
+    // ZlibError" instead of talking to the real API.
+    delete env.ANTHROPIC_BASE_URL;
+    delete env.ANTHROPIC_BEDROCK_BASE_URL;
+    delete env.ANTHROPIC_VERTEX_BASE_URL;
+    // A dev server started from a GUI context often has a minimal PATH, and
+    // `claude` installs to ~/.local/bin. Make sure that is reachable.
+    if (process.env.HOME) env.PATH = `${process.env.HOME}/.local/bin:${env.PATH ?? ""}`;
+
+    let child;
+    try {
+      child = spawn(bin, args, { env });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+
+    let out = "";
+    let err = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`claude CLI timed out after ${Math.round(CLI_TIMEOUT_MS / 1000)}s.`));
+    }, CLI_TIMEOUT_MS);
+
+    child.on("error", (e: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      if (e.code === "ENOENT") {
+        reject(
+          new Error(
+            "'claude' CLI not found. Install Claude Code, set CLAUDE_BIN to its path, or set COPY_BACKEND=api to use the API.",
+          ),
+        );
+      } else reject(e);
+    });
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 && !out) {
+        reject(new Error(`claude CLI exited ${code}: ${err.slice(0, 300)}`));
+        return;
+      }
+      try {
+        const envelope = JSON.parse(out);
+        if (envelope.is_error) {
+          reject(new Error(`claude CLI: ${String(envelope.result).slice(0, 300)}`));
+          return;
+        }
+        // On a subscription `total_cost_usd` is what the turn WOULD have cost on
+        // the API, not a charge. Surfaced so the saving stays visible.
+        resolve({ text: String(envelope.result ?? ""), costUsd: Number(envelope.total_cost_usd) || 0 });
+      } catch {
+        reject(new Error(`Could not parse claude CLI output: ${out.slice(0, 200)}`));
+      }
+    });
+
+    child.stdin.write(user);
+    child.stdin.end();
+  });
+}
+
+// Shared by both backends: the model is asked for a bare JSON array, but may
+// fence it or wrap it in a sentence. Tolerate both, give up quietly otherwise.
+function parseOptions(raw: string): CopyOption[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripFences(raw));
+  } catch {
+    const m = raw.match(/\[[\s\S]*\]/);
+    try {
+      parsed = m ? JSON.parse(m[0]) : [];
+    } catch {
+      parsed = [];
+    }
+  }
+
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((o): o is CopyOption => !!o && typeof o === "object" && typeof (o as CopyOption).text === "string")
+    .map((o) => ({
+      angle: String(o.angle ?? "Option").slice(0, 60),
+      text: String(o.text).slice(0, 1000),
+      rationale: String(o.rationale ?? "").slice(0, 240),
+    }))
+    .slice(0, 3);
 }
 
 export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption[]> {
@@ -199,6 +342,30 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     .filter(Boolean)
     .join("\n\n");
 
+  if (chosenBackend() === "cli") {
+    // No structured-output mode on the CLI, so a bad parse gets one retry with a
+    // blunter instruction before giving up.
+    const suffix = "\n\nReturn ONLY the JSON array described above. No prose, no markdown code fences.";
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const nudge =
+        attempt === 0
+          ? suffix
+          : `${suffix}\n\nYour previous output was not valid JSON. Output ONLY the JSON array this time.`;
+      try {
+        const { text } = await runClaudeCli(POSITIONING_BRIEF, context + nudge);
+        const options = parseOptions(text);
+        if (options.length) return options;
+        lastErr = new Error("claude CLI returned no usable drafts.");
+      } catch (e) {
+        lastErr = e;
+        // A missing binary or a timeout will not fix itself on retry.
+        if (e instanceof Error && (e.message.includes("not found") || e.message.includes("timed out"))) break;
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error("CLI copy generation failed.");
+  }
+
   const msg = await client().messages.create({
     model: MODEL,
     max_tokens: 2000,
@@ -207,22 +374,5 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   });
 
   const textOut = msg.content.find((b) => b.type === "text");
-  const raw = textOut && textOut.type === "text" ? textOut.text : "";
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stripFences(raw));
-  } catch {
-    const m = raw.match(/\[[\s\S]*\]/);
-    parsed = m ? JSON.parse(m[0]) : [];
-  }
-
-  if (!Array.isArray(parsed)) return [];
-  return parsed
-    .filter((o): o is CopyOption => !!o && typeof o === "object" && typeof (o as CopyOption).text === "string")
-    .map((o) => ({
-      angle: String(o.angle ?? "Option").slice(0, 60),
-      text: String(o.text).slice(0, 1000),
-      rationale: String(o.rationale ?? "").slice(0, 240),
-    }))
-    .slice(0, 3);
+  return parseOptions(textOut && textOut.type === "text" ? textOut.text : "");
 }
