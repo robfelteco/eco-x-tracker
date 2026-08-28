@@ -9,6 +9,7 @@ import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
 import { ICP_BY_ID } from "./icp.ts";
 import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
+import { getSourcesFor } from "./analogSources.ts";
 
 // In-tool "draft starting copy" — turns a prioritized recommendation into 2-3
 // on-brand X post options the operator can take to 90/10. NOT a finished-post
@@ -70,6 +71,15 @@ export interface CopyOption {
   angle: string; // short label for the approach ("Institutional hook", "Dev-focused", …)
   text: string; // the draft post
   rationale: string; // one line on why this angle / which ICP + pillar it plays to
+  // --- Citation, for curriculum posts ---
+  // Split in two because the X rules and the credit requirement pull in
+  // opposite directions: an in-body link suppresses reach, but an unsourced
+  // claim about how CHIPS settles is worse than a smaller audience. So the
+  // BODY credits the source by name and the LINK rides in the first reply,
+  // which is where the algorithm wants it anyway.
+  sourceTitle?: string; // what the body credits, e.g. "the BIS quarterly review"
+  sourceUrl?: string; // the link for the reply
+  replyText?: string; // the ready-to-post first reply carrying that link
 }
 
 export interface GenerateCopyInput {
@@ -223,8 +233,48 @@ function parseOptions(raw: string): CopyOption[] {
       // replies the X rules are written around.
       text: String(o.text).slice(0, 2400),
       rationale: String(o.rationale ?? "").slice(0, 240),
+      sourceTitle: o.sourceTitle ? String(o.sourceTitle).slice(0, 200) : undefined,
+      sourceUrl: o.sourceUrl ? String(o.sourceUrl).slice(0, 500) : undefined,
+      replyText: o.replyText ? String(o.replyText).slice(0, 500) : undefined,
     }))
     .slice(0, 3);
+}
+
+
+// Belt and braces on the citation. The prompt says "copy the URL exactly", and
+// models mostly do — but "mostly" is not good enough for a link we publish, and
+// a mis-copied URL is indistinguishable from a real one at a glance. So every
+// returned sourceUrl must match a URL we actually verified; if it does not, we
+// try to recover it from the title, and failing that we strip the citation
+// rather than ship a link nobody checked.
+function reconcileSources(options: CopyOption[], sources: { title: string; url: string }[]): CopyOption[] {
+  if (!sources.length) return options;
+  const byUrl = new Map(sources.map((s) => [s.url.replace(/\/+$/, ""), s]));
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+
+  return options.map((o) => {
+    if (!o.sourceUrl && !o.sourceTitle) return o;
+    const claimed = (o.sourceUrl ?? "").replace(/\/+$/, "");
+    let match = byUrl.get(claimed);
+
+    if (!match && o.sourceTitle) {
+      const want = norm(o.sourceTitle);
+      match =
+        sources.find((s) => norm(s.title) === want) ??
+        sources.find((s) => norm(s.title).includes(want) || want.includes(norm(s.title)));
+    }
+
+    if (!match) {
+      console.warn(`[generateCopy] dropped an unverifiable citation: ${o.sourceUrl ?? o.sourceTitle}`);
+      return { ...o, sourceUrl: undefined, replyText: undefined };
+    }
+    // The reply carries the link, so rewrite it around the URL we trust rather
+    // than the one the model typed.
+    const reply = o.replyText
+      ? o.replyText.replace(/https?:\/\/\S+/g, match.url)
+      : `Source: ${match.title}\n${match.url}`;
+    return { ...o, sourceTitle: match.title, sourceUrl: match.url, replyText: reply };
+  });
 }
 
 export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption[]> {
@@ -236,10 +286,24 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;
   const video = input.videoId ? await getVideo(input.videoId) : null;
   const analog = input.analogId ? ANALOG_BY_ID[input.analogId] : null;
+  // Verified source material for this concept. A curriculum draft is not
+  // allowed to proceed without it — see the throw below.
+  const analogSources = analog ? await getSourcesFor(analog.id) : [];
   const eduShape = input.eduShape ? EDU_SHAPE_BY_ID[input.eduShape] : null;
   // An analog concept names its own ICPs; the first is the primary reader.
   const icpId = docPage?.icp ?? video?.icp ?? analog?.icps[0] ?? null;
   const icp = icpId ? ICP_BY_ID[icpId] : null;
+
+  // No source, no draft. Rob's rule: "we can't just yolo copy without any
+  // source material." Failing loudly here is deliberate — silently producing an
+  // unsourced explainer is the outcome we are trying to make impossible, and
+  // the UI turns this message into a "Find sources" prompt.
+  if (analog && analogSources.length === 0) {
+    throw new Error(
+      `No verified source material for "${analog.label}" yet. Run Find sources on this concept first — ` +
+        `curriculum posts must argue from something citable.`,
+    );
+  }
 
   const priors = (input.priorTexts ?? []).filter((t) => t && t.trim().length > 20).slice(0, 6);
 
@@ -369,11 +433,40 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           `about ${analog.label} without ever implying Eco belongs to that category. Eco is the`,
           `routing and execution layer; never an orchestrator, PSP, gateway, prime broker or bridge.`,
           analog.guardrail ? `CONCEPT GUARDRAIL: ${analog.guardrail}` : null,
-          analog.sources?.length
-            ? `Where we learned it (do not link these in the post; they are for your accuracy): ${analog.sources
-                .map((sr) => sr.title)
-                .join("; ")}`
-            : null,
+          ``,
+          `SOURCE MATERIAL — you MUST ground this post in ONE of these and credit it.`,
+          `Pick the single source that best supports your angle. Do not blend several.`,
+          // Four, not six, and facts capped. The source block is the biggest
+          // thing this prompt gained, and a bloated prompt makes the CLI
+          // backend's 300s ceiling reachable — which surfaces to the operator
+          // as a timeout rather than a draft. Four well-chosen sources are
+          // already more than one post can argue from.
+          ...analogSources.slice(0, 4).map((sr, i) =>
+            [
+              `[${i + 1}] ${sr.title}`,
+              sr.publisher ? `    Publisher: ${sr.publisher}${sr.publishedOn ? ` (${sr.publishedOn})` : ""}` : null,
+              `    Kind: ${sr.kind ?? "article"}   URL: ${sr.url}`,
+              sr.summary ? `    What it says: ${sr.summary}` : null,
+              sr.keyFacts.length
+                ? `    Checkable claims:\n${sr.keyFacts.map((f) => `      - ${f}`).join("\n")}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          ),
+          ``,
+          `HOW TO USE IT — this is not decoration, it is the spine of the post:`,
+          `  * Build the post around a SPECIFIC claim from the source you picked. Prefer a number,`,
+          `    a named system, or a dated fact over a general statement.`,
+          `  * Never assert a mechanism the source does not support. If you are unsure whether the`,
+          `    source backs a claim, leave the claim out. We are teaching people who work in these`,
+          `    systems daily; a wrong detail costs more than a weaker post.`,
+          `  * CREDIT IT IN THE BODY, by name, not by link — e.g. "the BIS put a number on this",`,
+          `    "SWIFT's own documentation describes it this way". In-body links suppress reach, so`,
+          `    the link goes in the FIRST REPLY instead, which is where the algorithm wants it.`,
+          `  * Return the source you used in "sourceTitle" and "sourceUrl", and write the first`,
+          `    reply into "replyText" — a short line plus the bare URL. Copy the URL EXACTLY as`,
+          `    given above; never invent, shorten or guess one.`,
         ]
           .filter(Boolean)
           .join("\n")
@@ -394,7 +487,9 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
 
     "",
     "Return 2-3 distinct starting-point drafts as STRICT JSON only, no prose, no code fences:",
-    `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP + pillar, why this hook>"}]`,
+    analog
+      ? `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "replyText": "<the first reply, carrying the link>"}]`
+      : `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP + pillar, why this hook>"}]`,
     "Each draft targets ONE ICP. Vary the angle across drafts. Keep them tight and reply-baiting per the X rules.",
   ]
     .filter(Boolean)
@@ -412,7 +507,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           : `${suffix}\n\nYour previous output was not valid JSON. Output ONLY the JSON array this time.`;
       try {
         const { text, costUsd } = await runClaudeCli(POSITIONING_BRIEF, context + nudge);
-        const options = parseOptions(text);
+        const options = reconcileSources(parseOptions(text), analogSources);
         if (options.length) {
           // Printed so the operator can SEE which backend served the draft.
           // costUsd is what the turn would have cost on the API — on a
@@ -441,7 +536,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   });
 
   const textOut = msg.content.find((b) => b.type === "text");
-  const options = parseOptions(textOut && textOut.type === "text" ? textOut.text : "");
+  const options = reconcileSources(parseOptions(textOut && textOut.type === "text" ? textOut.text : ""), analogSources);
   // Same line for the API path, so the two are impossible to confuse. Priced
   // from usage rather than guessed.
   const u = msg.usage;

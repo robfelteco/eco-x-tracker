@@ -41,6 +41,10 @@ export interface Target {
   // ANALOGY BREAKS — which is both the point of the concept and the thing the
   // operator most needs to read before drafting from it.
   note?: string | null;
+  // Verified source material behind a curriculum concept. Listed on the row
+  // because the operator should be able to see what a draft will be arguing
+  // from — and notice when the answer is "nothing" — before spending a draft.
+  sources?: { title: string; url: string; publisher: string | null; kind: string | null; seed: boolean }[];
   basePostText?: string | null;
   // Small coloured chip on the row — "Hero", "Never posted", "Has file".
   badges?: { label: string; tone: "good" | "warn" | "mute"; title?: string }[];
@@ -98,6 +102,7 @@ export interface VideosMeta {
 // DOORS, not posts — "19 of 20 never taught" is the number that should change
 // behaviour, and it is invisible in any post-derived metric.
 export interface CurriculumMeta {
+  unsourced: number;
   totalConcepts: number;
   taught: number;
   neverTaught: number;
@@ -125,6 +130,12 @@ interface CopyOption {
   angle: string;
   text: string;
   rationale: string;
+  // Curriculum drafts carry their citation. The body credits the source by
+  // name; the link rides in a separate first reply, because in-body links cost
+  // reach.
+  sourceTitle?: string;
+  sourceUrl?: string;
+  replyText?: string;
 }
 
 function compact(n: number | null | undefined): string {
@@ -177,7 +188,7 @@ export function RecActions({
   const [optionsByKey, setOptionsByKey] = useState<Record<string, CopyOption[]>>({});
   const [errByKey, setErrByKey] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<{ key: string; idx: number } | null>(null);
-  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [shapeByKey, setShapeByKey] = useState<Record<string, string>>({});
 
   // Which product accordion is open (products mode).
@@ -194,6 +205,13 @@ export function RecActions({
   const [questionsByKey, setQuestionsByKey] = useState<Record<string, MinedQuestion[]>>({});
   const [miningKey, setMiningKey] = useState<string | null>(null);
   const [mineErrByKey, setMineErrByKey] = useState<Record<string, string>>({});
+
+  // Source discovery. Every URL is HTTP-checked server-side before it is
+  // stored, so what lands here is citable, not merely plausible.
+  const [sourcesByKey, setSourcesByKey] = useState<Record<string, NonNullable<Target["sources"]>>>({});
+  const [findingKey, setFindingKey] = useState<string | null>(null);
+  const [srcErrByKey, setSrcErrByKey] = useState<Record<string, string>>({});
+  const [srcNoteByKey, setSrcNoteByKey] = useState<Record<string, string>>({});
 
   const [marking, setMarking] = useState(false);
   const [markedKey, setMarkedKey] = useState<string | null>(null);
@@ -239,11 +257,11 @@ export function RecActions({
     }
   }
 
-  async function copy(text: string, idx: number) {
+  async function copy(text: string, id: string) {
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedIdx(idx);
-      setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1500);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1500);
     } catch {
       /* clipboard blocked */
     }
@@ -269,6 +287,34 @@ export function RecActions({
       }
     } finally {
       setMarking(false);
+    }
+  }
+
+  async function findSources(t: Target) {
+    if (!t.analogId) return;
+    setFindingKey(t.key);
+    setSrcErrByKey((e) => ({ ...e, [t.key]: "" }));
+    setSrcNoteByKey((n) => ({ ...n, [t.key]: "" }));
+    try {
+      const res = await fetch("/api/analog-sources", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ analogId: t.analogId }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setSourcesByKey((m) => ({ ...m, [t.key]: data.sources ?? [] }));
+        const dropped = (data.rejected ?? []).length;
+        setSrcNoteByKey((n) => ({
+          ...n,
+          [t.key]: `${data.added} verified${dropped ? ` · ${dropped} dropped (URL didn't resolve)` : ""}`,
+        }));
+        startTransition(() => router.refresh());
+      } else setSrcErrByKey((e) => ({ ...e, [t.key]: data.error || "Source search failed" }));
+    } catch (e) {
+      setSrcErrByKey((err) => ({ ...err, [t.key]: e instanceof Error ? e.message : "Source search failed" }));
+    } finally {
+      setFindingKey(null);
     }
   }
 
@@ -350,14 +396,57 @@ export function RecActions({
                       {o.angle}
                     </span>
                     <button
-                      onClick={(e) => { e.stopPropagation(); copy(o.text, i); }}
+                      onClick={(e) => { e.stopPropagation(); copy(o.text, `${key}-post-${i}`); }}
                       className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
                     >
-                      {copiedIdx === i ? "Copied ✓" : "Copy"}
+                      {copiedId === `${key}-post-${i}` ? "Copied ✓" : "Copy post"}
                     </button>
                   </div>
                   <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
                   {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
+
+                  {/* The citation, and the reply that carries the link. Kept
+                      visually separate from the post body because they are two
+                      separate things to publish: the body credits the source by
+                      name, the reply carries the URL. An in-body link would cost
+                      reach, which is why they are split at all. */}
+                  {o.sourceTitle && (
+                    <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-mono text-[9.5px] uppercase tracking-wider text-white/30">Argued from</div>
+                          <div className="mt-0.5 text-[11.5px] leading-snug text-white/70">
+                            {o.sourceUrl ? (
+                              <a
+                                href={o.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="underline decoration-white/20 underline-offset-2 hover:text-eco-lightblue"
+                              >
+                                {o.sourceTitle}
+                              </a>
+                            ) : (
+                              o.sourceTitle
+                            )}
+                          </div>
+                        </div>
+                        {o.replyText && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); copy(o.replyText!, `${key}-reply-${i}`); }}
+                            className="flex-none rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
+                          >
+                            {copiedId === `${key}-reply-${i}` ? "Copied ✓" : "Copy reply"}
+                          </button>
+                        )}
+                      </div>
+                      {o.replyText && (
+                        <p className="mt-1.5 whitespace-pre-wrap break-words border-l-2 border-eco-lightblue/40 pl-2 text-[11.5px] text-white/50">
+                          {o.replyText}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -439,6 +528,16 @@ export function RecActions({
           </div>
           {t.analogId && (
             <button
+              onClick={() => findSources(t)}
+              disabled={findingKey === t.key}
+              title="Search for authoritative explainers, reports and primers on this mechanism. Every URL is checked before it is stored — a citation that 404s is worse than none."
+              className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/60 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+            >
+              {findingKey === t.key ? "Searching…" : "Find sources"}
+            </button>
+          )}
+          {t.analogId && (
+            <button
               onClick={() => mine(t)}
               disabled={miningKey === t.key}
               title="Search YouTube, X, Reddit and forums for the questions people actually ask about this mechanism. Unanswered and recurring rank first."
@@ -455,6 +554,60 @@ export function RecActions({
             {isLoading ? "Drafting…" : opts ? "Redraft" : "Draft copy"}
           </button>
         </div>
+
+        {/* The evidence base, listed before the teaching content. A curriculum
+            draft argues FROM one of these, so seeing them — or seeing that
+            there are none — is what tells the operator whether drafting is
+            even worth a click. */}
+        {t.analogId && (() => {
+          const srcs = sourcesByKey[t.key] ?? t.sources ?? [];
+          const note = srcNoteByKey[t.key];
+          const err = srcErrByKey[t.key];
+          return (
+            <div className="border-t border-white/[0.06] px-3 py-2">
+              <div className="mb-1 flex flex-wrap items-baseline gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-white/30">
+                  Source material
+                </span>
+                {note && <span className="font-mono text-[10px] text-emerald-300/70">{note}</span>}
+                {findingKey === t.key && <span className="text-[11px] text-white/40">searching + verifying…</span>}
+              </div>
+              {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
+              {srcs.length === 0 ? (
+                <p className="text-[11px] text-amber-300/70">
+                  Nothing citable yet — drafting is blocked until this concept has a source.
+                </p>
+              ) : (
+                <ul className="space-y-0.5">
+                  {srcs.slice(0, 5).map((sr) => (
+                    <li key={sr.url} className="text-[11.5px] leading-snug text-white/55">
+                      <a
+                        href={sr.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-white/75 underline decoration-white/20 underline-offset-2 hover:text-eco-lightblue"
+                      >
+                        {sr.title}
+                      </a>
+                      {sr.publisher && <span className="text-white/40"> — {sr.publisher}</span>}
+                      {sr.kind && sr.kind !== "article" && (
+                        <span className="ml-1.5 font-mono text-[9.5px] uppercase tracking-wider text-white/30">{sr.kind}</span>
+                      )}
+                      {sr.seed && (
+                        <span
+                          className="ml-1.5 rounded-full bg-emerald-400/15 px-1.5 py-0.5 font-mono text-[9.5px] text-emerald-300"
+                          title="Hand-picked — a person on the team actually read or watched this one."
+                        >
+                          vetted
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Where the analogy breaks. Shown unprompted rather than behind a
             disclosure: this is the actual content of the concept, and reading it
@@ -782,6 +935,14 @@ function CurriculumHeadline({ meta }: { meta: CurriculumMeta }) {
           </span>
         </span>
       ))}
+      {meta.unsourced > 0 && (
+        <span
+          className="text-amber-300/70"
+          title="These concepts have no verified source material, so they cannot be drafted yet. Run Find sources on them."
+        >
+          <span className="font-mono tabular-nums">{meta.unsourced}</span> unsourced
+        </span>
+      )}
       {meta.coldDoors.length > 0 && (
         <span className="text-amber-300/70" title="No concept naming these audiences has ever been taught.">
           Never reached: {meta.coldDoors.join(", ")}

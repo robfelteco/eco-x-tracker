@@ -1,6 +1,7 @@
 import { sql } from "./db.ts";
 import { ANALOG_DEFS, type AnalogDef, type AnalogTier } from "./analogs.ts";
 import { ICP_BY_ID } from "./icp.ts";
+import { getAllSources, type AnalogSource } from "./analogSources.ts";
 
 // The curriculum shelf — a registry-first shelf like docs.ts and videos.ts.
 //
@@ -61,7 +62,10 @@ export interface CurriculumRow {
   parallel: string;
   breaksWhere: string;
   guardrail: string | null;
-  sources: { title: string; url: string }[];
+  // Verified source material from analog_sources. NOT the registry's static
+  // list — these have been fetched and confirmed to resolve, and a concept with
+  // none of them cannot be drafted from at all.
+  sources: AnalogSource[];
   /** Posts that already touched this concept, newest first. Teaching + mentions. */
   posts: CurriculumPost[];
   /** Posts in a teaching pillar. This is the number coverage is scored on. */
@@ -72,11 +76,15 @@ export interface CurriculumRow {
   medianImpr: number | null;
   /** 0-100. Higher = teach this next. */
   score: number;
+  /** No verified source material — drafting is blocked until this is fixed. */
+  needsSources: boolean;
   /** Plain-English "why this score", same contract as Recommendation.scoreReasons. */
   reasons: string[];
 }
 
 export interface CurriculumMeta {
+  /** Concepts with no verified source material — these cannot be drafted yet. */
+  unsourced: number;
   totalConcepts: number;
   taught: number;
   neverTaught: number;
@@ -121,6 +129,8 @@ function coverageWeight(useCount: number, daysSince: number | null): { w: number
 }
 
 export async function getCurriculumShelf(): Promise<CurriculumShelf> {
+  const sourcesByConcept = await getAllSources();
+
   // One query for every analog-tagged post, with its latest impressions. Small
   // by construction — the whole point of this shelf is that very few posts
   // carry an analog_id.
@@ -191,7 +201,11 @@ export async function getCurriculumShelf(): Promise<CurriculumShelf> {
     // untaught concepts, never promote a weak concept over a strong one.
     const sideNudge = def.side === leanestSide ? 1.12 : 0.95;
 
+    const srcCount = (sourcesByConcept.get(def.id) ?? []).length;
     const reasons = [covWhy, STRENGTH_REASON[def.breakStrength]];
+    if (srcCount === 0) {
+      reasons.push("No verified source material yet — run Find sources before drafting");
+    }
     if (def.side === leanestSide) {
       const s = bySide.find((b) => b.side === def.side);
       reasons.push(
@@ -216,7 +230,8 @@ export async function getCurriculumShelf(): Promise<CurriculumShelf> {
       parallel: def.parallel,
       breaksWhere: def.breaksWhere,
       guardrail: def.guardrail ?? null,
-      sources: def.sources ?? [],
+      sources: sourcesByConcept.get(def.id) ?? [],
+      needsSources: (sourcesByConcept.get(def.id) ?? []).length === 0,
       posts: mine.map((m) => ({
         id: m.id,
         url: m.url,
@@ -229,7 +244,13 @@ export async function getCurriculumShelf(): Promise<CurriculumShelf> {
       mentionCount,
       daysSinceLastUse,
       medianImpr,
-      score: Math.max(0, Math.min(100, Math.round(100 * cov * strength * sideNudge))),
+      // An unsourced concept is not actually draftable, so it should not head
+      // the queue however strong its break is — half weight until it has
+      // something citable behind it.
+      score: Math.max(
+        0,
+        Math.min(100, Math.round(100 * cov * strength * sideNudge * (srcCount === 0 ? 0.5 : 1))),
+      ),
       reasons,
     };
   }).sort((a, b) => b.score - a.score);
@@ -253,6 +274,7 @@ export async function getCurriculumShelf(): Promise<CurriculumShelf> {
       totalConcepts: ANALOG_DEFS.length,
       taught: shelf.filter((r) => r.useCount > 0).length,
       neverTaught: shelf.filter((r) => r.useCount === 0).length,
+      unsourced: shelf.filter((r) => r.needsSources).length,
       coldDoors,
       bySide,
     },

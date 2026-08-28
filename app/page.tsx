@@ -459,6 +459,13 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
   if (r.guardrail) {
     badges.push({ label: "Guardrail", tone: "warn", title: r.guardrail });
   }
+  if (r.needsSources) {
+    badges.push({
+      label: "Needs sources",
+      tone: "warn",
+      title: "No verified source material — drafting is blocked until this concept has something citable behind it.",
+    });
+  }
   return {
     key: `analog-${r.analogId}`,
     label: r.label,
@@ -467,6 +474,7 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
       r.icpLabels.join(", "),
       r.useCount === 0 ? "never taught" : `taught ${r.useCount}×`,
       r.mentionCount > 0 ? `${r.mentionCount} passing mention${r.mentionCount === 1 ? "" : "s"}` : null,
+      r.sources.length ? `${r.sources.length} source${r.sources.length === 1 ? "" : "s"}` : "no sources",
       r.medianImpr != null ? `${compact(r.medianImpr)} median impr` : null,
       r.daysSinceLastUse != null ? `last ${daysAgo(r.daysSinceLastUse)}` : null,
     ]
@@ -479,6 +487,13 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
     // break server-side; this is the half the operator needs to read to decide
     // whether the concept is worth a post today.
     note: r.breaksWhere,
+    sources: r.sources.map((s) => ({
+      title: s.title,
+      url: s.url,
+      publisher: s.publisher,
+      kind: s.kind,
+      seed: s.sourceOf === "seed",
+    })),
     basePostText: null,
     angle: null,
     priorTexts: r.posts.slice(0, 6).map((p) => p.text),

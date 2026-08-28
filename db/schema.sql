@@ -589,3 +589,52 @@ CREATE INDEX IF NOT EXISTS posts_video_idx ON posts (video_id);
 -- ---------------------------------------------------------------------------
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS analog_id text;
 CREATE INDEX IF NOT EXISTS posts_analog_idx ON posts (analog_id) WHERE analog_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Migration 010 — analog_sources: the curriculum's evidence base.
+--
+-- Rob, on the first curriculum drafts: "we can't just yolo copy without any
+-- source material ... we need to ensure the copy is always relevant/aligned
+-- with/crediting to what the source material is."
+--
+-- He is right, and the first cut had it backwards twice over. Thirteen of the
+-- twenty concepts carried no source at all, and the drafter prompt explicitly
+-- told the model NOT to surface the ones that existed ("they are for your
+-- accuracy"). So a teaching post could assert how CHIPS settles with nothing
+-- behind it — the one failure mode that would actually cost us credibility with
+-- an institutional reader, who knows this material better than we do.
+--
+-- Why a table and not just AnalogDef.sources: sources are found (a Grok search
+-- per concept), verified (the URL has to actually resolve — a hallucinated
+-- citation is worse than none), reviewed, and they rot. That is data with a
+-- lifecycle, not a constant. The hand-curated seeds in lib/analogs.ts are
+-- loaded in as source_of='seed' and are the ones we trust most, because a human
+-- watched or read them.
+--
+-- key_facts is the part that makes drafts groundable rather than merely
+-- credited: specific, checkable claims lifted from the piece, so the drafter
+-- argues FROM the source instead of gesturing at it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS analog_sources (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  analog_id     text NOT NULL,              -- lib/analogs.ts concept id
+  title         text NOT NULL,
+  publisher     text,                       -- outlet / author / institution
+  url           text NOT NULL,
+  kind          text,                       -- article | report | video | primer | standard | regulation
+  published_on  text,                       -- loose: often only a year is knowable
+  summary       text,                       -- what the piece actually says
+  key_facts     text[] NOT NULL DEFAULT '{}', -- checkable claims a draft can argue from
+
+  -- A citation nobody checked is a liability. Nothing reaches the drafter
+  -- unless the URL resolved when we looked.
+  verified      boolean NOT NULL DEFAULT false,
+  http_status   integer,
+  checked_at    timestamptz,
+
+  source_of     text NOT NULL DEFAULT 'grok', -- 'seed' (human-vetted) | 'grok'
+  added_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS analog_sources_uidx ON analog_sources (analog_id, url);
+CREATE INDEX IF NOT EXISTS analog_sources_concept_idx ON analog_sources (analog_id);
