@@ -638,3 +638,53 @@ CREATE TABLE IF NOT EXISTS analog_sources (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS analog_sources_uidx ON analog_sources (analog_id, url);
 CREATE INDEX IF NOT EXISTS analog_sources_concept_idx ON analog_sources (analog_id);
+
+-- ---------------------------------------------------------------------------
+-- Migration 011 — the curriculum's evidence base gets a clock.
+--
+-- Rob: "it also looks you're only pulling from the source material i provided
+-- and they are remaining static. we should be constantly sweeping the web for
+-- new sources to feed this content pillar so posts can continue to be fresh."
+--
+-- The sharper version of that: the first sweep DID find sources for all twenty
+-- concepts, but everything it found is structurally evergreen. A BIS primer on
+-- RTGS explains the mechanism perfectly and will say the same thing in 2029.
+-- Ideal for teaching, useless for timeliness. So the base needs two layers:
+--
+--   canonical — the institution explaining its own mechanism. Never expires.
+--               This is what makes a post CORRECT.
+--   current   — this month's BIS quarterly, a Fed speech from last week, a
+--               conference talk from yesterday. This is what makes a post
+--               TIMELY, and what gives a new angle on a 150-year-old mechanism.
+--
+-- Retention is 365 days per Rob. Note what that implies: at four concepts a day
+-- each concept is swept roughly 73 times a year, so a year in there could be
+-- 75+ current rows per concept. That is an archive, not a freshness signal, and
+-- a drafter handed 75 sources would be both expensive and worse. So retention
+-- is long and the READ is narrow: sourcesForDrafting() hands over a couple of
+-- canonical rows plus only the newest current ones.
+-- ---------------------------------------------------------------------------
+ALTER TABLE analog_sources ADD COLUMN IF NOT EXISTS tier text NOT NULL DEFAULT 'canonical';
+-- When a 'current' row stops counting as current. Null for canonical.
+ALTER TABLE analog_sources ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+-- Where key_facts came from. A YouTube talk yields facts from its DESCRIPTION
+-- unless we pay to transcribe it, and a draft should not attribute a hard number
+-- to a video we never actually listened to.
+ALTER TABLE analog_sources ADD COLUMN IF NOT EXISTS facts_source text;
+CREATE INDEX IF NOT EXISTS analog_sources_tier_idx ON analog_sources (analog_id, tier, published_on DESC);
+
+-- Rotation state. The concept registry lives in code (lib/analogs.ts), so the
+-- only thing needing a row per concept is "when did we last sweep this one" —
+-- that is what makes the daily cron a rotation instead of a fan-out. A 20-concept
+-- daily fan-out would cost ~180 Firecrawl credits a day against a 5,000/cycle
+-- plan; four a day costs ~36 and refreshes everything every five days.
+CREATE TABLE IF NOT EXISTS analog_sweep_state (
+  analog_id      text PRIMARY KEY,
+  last_swept_at  timestamptz,
+  last_status    text,                          -- 'ok' | 'partial' | 'failed'
+  last_added     integer NOT NULL DEFAULT 0,
+  last_scanned   integer NOT NULL DEFAULT 0,
+  last_error     text,
+  spend_credits  integer NOT NULL DEFAULT 0,    -- cumulative Firecrawl credits
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);

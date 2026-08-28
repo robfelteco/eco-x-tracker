@@ -19,6 +19,8 @@ const XAI_MODEL = "grok-4.3";
 
 export type SourceKind = "article" | "report" | "video" | "primer" | "standard" | "regulation";
 
+export type SourceTier = "canonical" | "current";
+
 export interface AnalogSource {
   id: number;
   analogId: string;
@@ -31,7 +33,24 @@ export interface AnalogSource {
   keyFacts: string[];
   verified: boolean;
   sourceOf: string;
+  /** canonical = the mechanism, never expires. current = timely, 365-day window. */
+  tier: SourceTier;
+  /** 'body' when we scraped the piece, 'description' for a video we never heard. */
+  factsSource: string | null;
+  /** Days since first seen. Drives the "newest 6d" read on the shelf. */
+  ageDays: number | null;
 }
+
+// Retention for a 'current' source, per Rob. Deliberately long: nothing is
+// thrown away for a year. Freshness is expressed at the READ instead, by
+// ordering on recency and capping what the drafter sees.
+export const CURRENT_RETENTION_DAYS = 365;
+
+// How many of each tier the drafter actually receives. A post needs one
+// mechanism source to be correct and one recent source to be timely; handing
+// over twenty of each makes the prompt expensive and the draft vaguer.
+const DRAFT_CANONICAL = 2;
+const DRAFT_CURRENT = 2;
 
 // ---------------------------------------------------------------------------
 // Read
@@ -41,12 +60,32 @@ export async function getSourcesFor(analogId: string): Promise<AnalogSource[]> {
   return sql<AnalogSource>`
     SELECT id, analog_id AS "analogId", title, publisher, url, kind,
            published_on AS "publishedOn", summary, key_facts AS "keyFacts",
-           verified, source_of AS "sourceOf"
+           verified, source_of AS "sourceOf", tier, facts_source AS "factsSource",
+           EXTRACT(DAY FROM now() - added_at)::int AS "ageDays"
     FROM analog_sources
     WHERE analog_id = ${analogId} AND verified = true
-    -- Human-vetted seeds first: someone actually read or watched those.
-    ORDER BY (source_of = 'seed') DESC, array_length(key_facts, 1) DESC NULLS LAST, added_at
+      AND (expires_at IS NULL OR expires_at > now())
+    -- Current material first and newest-first inside it, because that is what
+    -- makes a post timely. Human-vetted seeds lead the canonical block: someone
+    -- actually read or watched those.
+    ORDER BY (tier = 'current') DESC,
+             added_at DESC,
+             (source_of = 'seed') DESC,
+             array_length(key_facts, 1) DESC NULLS LAST
   `;
+}
+
+// What the drafter gets: a couple of canonical rows for the mechanism plus the
+// newest current rows for timeliness. Ordered canonical-first so the model reads
+// the mechanism before the news.
+export async function sourcesForDrafting(analogId: string): Promise<AnalogSource[]> {
+  const all = await getSourcesFor(analogId);
+  const canonical = all.filter((s) => s.tier === "canonical").slice(0, DRAFT_CANONICAL);
+  const current = all
+    .filter((s) => s.tier === "current")
+    .sort((a, b) => (a.ageDays ?? 9999) - (b.ageDays ?? 9999))
+    .slice(0, DRAFT_CURRENT);
+  return [...canonical, ...current];
 }
 
 // One round trip for the whole shelf, so the Prioritize page doesn't fire twenty
@@ -55,10 +94,12 @@ export async function getAllSources(): Promise<Map<string, AnalogSource[]>> {
   const rows = await sql<AnalogSource>`
     SELECT id, analog_id AS "analogId", title, publisher, url, kind,
            published_on AS "publishedOn", summary, key_facts AS "keyFacts",
-           verified, source_of AS "sourceOf"
+           verified, source_of AS "sourceOf", tier, facts_source AS "factsSource",
+           EXTRACT(DAY FROM now() - added_at)::int AS "ageDays"
     FROM analog_sources
-    WHERE verified = true
-    ORDER BY analog_id, (source_of = 'seed') DESC, array_length(key_facts, 1) DESC NULLS LAST, added_at
+    WHERE verified = true AND (expires_at IS NULL OR expires_at > now())
+    ORDER BY analog_id, (tier = 'current') DESC, added_at DESC,
+             (source_of = 'seed') DESC, array_length(key_facts, 1) DESC NULLS LAST
   `;
   const map = new Map<string, AnalogSource[]>();
   for (const r of rows) {

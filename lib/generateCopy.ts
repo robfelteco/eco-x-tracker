@@ -9,7 +9,8 @@ import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
 import { ICP_BY_ID } from "./icp.ts";
 import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
-import { getSourcesFor } from "./analogSources.ts";
+import { sourcesForDrafting } from "./analogSources.ts";
+import { pillarShapeBlock } from "./pillarShapes.ts";
 
 // In-tool "draft starting copy" — turns a prioritized recommendation into 2-3
 // on-brand X post options the operator can take to 90/10. NOT a finished-post
@@ -72,14 +73,16 @@ export interface CopyOption {
   text: string; // the draft post
   rationale: string; // one line on why this angle / which ICP + pillar it plays to
   // --- Citation, for curriculum posts ---
-  // Split in two because the X rules and the credit requirement pull in
-  // opposite directions: an in-body link suppresses reach, but an unsourced
-  // claim about how CHIPS settles is worse than a smaller audience. So the
-  // BODY credits the source by name and the LINK rides in the first reply,
-  // which is where the algorithm wants it anyway.
+  // ONE POST. The link lives in the body, not a self-reply: no link penalty
+  // exists in the August 2026 algorithm and open_link carries +0.2, so the
+  // earlier split was costing reach for nothing. Rob: "we are never doing that."
   sourceTitle?: string; // what the body credits, e.g. "the BIS quarterly review"
-  sourceUrl?: string; // the link for the reply
-  replyText?: string; // the ready-to-post first reply carrying that link
+  sourceUrl?: string; // the URL, which must appear in `text`
+  // Self-scored against the x-algo-optimizer rubric in the same call, so it
+  // costs nothing extra. Weakly calibrated by nature: useful for ranking the
+  // three options against each other, not as an absolute number.
+  score?: number;
+  scoreNote?: string;
 }
 
 export interface GenerateCopyInput {
@@ -235,7 +238,8 @@ function parseOptions(raw: string): CopyOption[] {
       rationale: String(o.rationale ?? "").slice(0, 240),
       sourceTitle: o.sourceTitle ? String(o.sourceTitle).slice(0, 200) : undefined,
       sourceUrl: o.sourceUrl ? String(o.sourceUrl).slice(0, 500) : undefined,
-      replyText: o.replyText ? String(o.replyText).slice(0, 500) : undefined,
+      score: Number.isFinite(o.score) ? Math.max(0, Math.min(100, Math.round(Number(o.score)))) : undefined,
+      scoreNote: o.scoreNote ? String(o.scoreNote).slice(0, 240) : undefined,
     }))
     .slice(0, 3);
 }
@@ -266,14 +270,26 @@ function reconcileSources(options: CopyOption[], sources: { title: string; url: 
 
     if (!match) {
       console.warn(`[generateCopy] dropped an unverifiable citation: ${o.sourceUrl ?? o.sourceTitle}`);
-      return { ...o, sourceUrl: undefined, replyText: undefined };
+      // Strip any URL the model invented out of the body too, rather than
+      // publishing a link nobody checked.
+      return {
+        ...o,
+        text: o.text.replace(/https?:\/\/\S+/g, "").replace(/[ \t]+\n/g, "\n").trim(),
+        sourceUrl: undefined,
+      };
     }
-    // The reply carries the link, so rewrite it around the URL we trust rather
-    // than the one the model typed.
-    const reply = o.replyText
-      ? o.replyText.replace(/https?:\/\/\S+/g, match.url)
-      : `Source: ${match.title}\n${match.url}`;
-    return { ...o, sourceTitle: match.title, sourceUrl: match.url, replyText: reply };
+
+    // The body carries the link now, so the body is what gets corrected. Any
+    // URL the model typed is replaced with the one we verified; if it forgot
+    // the link entirely, append it on its own line.
+    let text = o.text;
+    const urls = text.match(/https?:\/\/\S+/g) ?? [];
+    if (urls.length === 0) {
+      text = `${text.trim()}\n\n${match.url}`;
+    } else if (!urls.some((u) => u.replace(/[).,]+$/, "").replace(/\/+$/, "") === match.url.replace(/\/+$/, ""))) {
+      text = text.replace(/https?:\/\/\S+/g, match.url);
+    }
+    return { ...o, text, sourceTitle: match.title, sourceUrl: match.url };
   });
 }
 
@@ -286,9 +302,10 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;
   const video = input.videoId ? await getVideo(input.videoId) : null;
   const analog = input.analogId ? ANALOG_BY_ID[input.analogId] : null;
-  // Verified source material for this concept. A curriculum draft is not
-  // allowed to proceed without it — see the throw below.
-  const analogSources = analog ? await getSourcesFor(analog.id) : [];
+  // Verified source material for this concept: a couple of canonical rows for
+  // the mechanism plus the newest current ones for timeliness. A curriculum
+  // draft is not allowed to proceed without it, see the throw below.
+  const analogSources = analog ? await sourcesForDrafting(analog.id) : [];
   const eduShape = input.eduShape ? EDU_SHAPE_BY_ID[input.eduShape] : null;
   // An analog concept names its own ICPs; the first is the primary reader.
   const icpId = docPage?.icp ?? video?.icp ?? analog?.icps[0] ?? null;
@@ -309,6 +326,12 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
 
   const context = [
     `Content pillar: ${def.label} — ${def.description}`,
+
+    // Per-pillar construction rules (lib/pillarShapes.ts). Placed second on
+    // purpose: form before content, because "earn a copy-link share" means
+    // something different for a 12-second data animation than for a five-post
+    // explainer of correspondent banking.
+    pillarShapeBlock(input.template, analog ? "curriculum" : input.template === "broad_educational" ? "news" : undefined),
 
     product
       ? [
@@ -455,18 +478,25 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
               .join("\n"),
           ),
           ``,
-          `HOW TO USE IT — this is not decoration, it is the spine of the post:`,
+          `CANONICAL sources explain the mechanism and are what make the post CORRECT.`,
+          `CURRENT sources report something recent and are what make the post TIMELY.`,
+          `The strongest draft uses a CURRENT source for the hook and a CANONICAL one for the`,
+          `mechanism underneath it. If only canonical material exists, write the evergreen version.`,
+          ``,
+          `HOW TO USE IT, this is not decoration, it is the spine of the post:`,
           `  * Build the post around a SPECIFIC claim from the source you picked. Prefer a number,`,
           `    a named system, or a dated fact over a general statement.`,
           `  * Never assert a mechanism the source does not support. If you are unsure whether the`,
           `    source backs a claim, leave the claim out. We are teaching people who work in these`,
           `    systems daily; a wrong detail costs more than a weaker post.`,
-          `  * CREDIT IT IN THE BODY, by name, not by link — e.g. "the BIS put a number on this",`,
-          `    "SWIFT's own documentation describes it this way". In-body links suppress reach, so`,
-          `    the link goes in the FIRST REPLY instead, which is where the algorithm wants it.`,
-          `  * Return the source you used in "sourceTitle" and "sourceUrl", and write the first`,
-          `    reply into "replyText" — a short line plus the bare URL. Copy the URL EXACTLY as`,
-          `    given above; never invent, shorten or guess one.`,
+          `  * CREDIT IT BY NAME IN THE BODY, e.g. "the BIS put a number on this", "SWIFT's own`,
+          `    documentation describes it this way".`,
+          `  * PUT THE LINK IN THE POST BODY TOO, on its own line. ONE POST: never a self-reply,`,
+          `    never "link in reply", never "source below". There is no link penalty in the`,
+          `    algorithm and link opens are rewarded, so the reader gets the source where they`,
+          `    are already reading. Copy the URL EXACTLY as given above; never invent, shorten`,
+          `    or guess one.`,
+          `  * Return the source you used in "sourceTitle" and "sourceUrl".`,
         ]
           .filter(Boolean)
           .join("\n")
@@ -488,9 +518,18 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     "",
     "Return 2-3 distinct starting-point drafts as STRICT JSON only, no prose, no code fences:",
     analog
-      ? `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "replyText": "<the first reply, carrying the link>"}]`
-      : `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP + pillar, why this hook>"}]`,
-    "Each draft targets ONE ICP. Vary the angle across drafts. Keep them tight and reply-baiting per the X rules.",
+      ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
+      : `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP + pillar, why this hook>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`,
+    "Each draft targets ONE ICP. Vary the angle across drafts.",
+    "",
+    "SCORE each draft 0-100 before returning it, and let the score change the draft:",
+    "  citability (would someone paste this URL into a work channel? this is the 20.0 signal)",
+    "  conversational pull (does it earn a considered reply or quote, without bait?)",
+    "  dwell value (enough substance to hold attention)",
+    "  hook honesty (does the payload deliver what the first line implies?)",
+    "  standing out from a feed of stablecoin takes",
+    "  slop risk (does it read as machine-written? check the voice mechanics)",
+    "Anything you would score under 60, rewrite before returning it. Put the weakest dimension in scoreNote.",
   ]
     .filter(Boolean)
     .join("\n\n");

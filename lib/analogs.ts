@@ -79,6 +79,14 @@ export interface AnalogDef {
   guardrail?: string;
   /** Where we learned it, so a draft can cite the analog honestly. */
   sources?: AnalogSource[];
+  /**
+   * Institutional hubs the sweep enumerates for THIS concept (lib/analogSweep).
+   * Editorial, so it lives in code next to the vocabulary rather than in a
+   * table: which institution owns a mechanism is a judgment, not data.
+   * mapReportHub() lists the real pieces below a hub, so point these at an
+   * index page (a publications list, an insights blog), never at a homepage.
+   */
+  hubs?: string[];
 }
 
 export const TIER_LABEL: Record<AnalogTier, string> = {
@@ -104,6 +112,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "exchanges"],
     breakStrength: 3,
+    hubs: ["https://www.bis.org/cpmi/publications.htm"],
     vocab: [
       "payment orchestration",
       "payments orchestration",
@@ -136,6 +145,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "technical",
     icps: ["treasury", "solvers"],
     breakStrength: 3,
+    hubs: ["https://www.sec.gov/news/pressreleases"],
     vocab: [
       "smart order routing",
       "order routing",
@@ -164,6 +174,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "treasury"],
     breakStrength: 2,
+    hubs: ["https://www.federalreserve.gov/newsevents/speech"],
     vocab: ["least-cost routing", "least cost routing", "cost per transaction", "route selection", "rate card"],
     parallel:
       "Pick the cheapest viable path for each transaction against a known rate card, with a fallback if the first choice fails.",
@@ -180,6 +191,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "wallets"],
     breakStrength: 2,
+    hubs: ["https://www.ecb.europa.eu/press/pubbydate/html/index.en.html"],
     vocab: ["soft decline", "retry cascade", "smart transaction routing", "payment failover"],
     parallel:
       "A declined attempt is retried automatically down a ranked list of providers until one authorises. Recovered revenue is the whole ROI story.",
@@ -196,6 +208,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "exchanges"],
     breakStrength: 2,
+    hubs: ["https://www.bis.org/cpmi/publications.htm"],
     vocab: ["payment gateway", "payment processor", "merchant of record", "acquiring bank"],
     parallel:
       "The definitional post: money movement has always been layered, and knowing who does what is how a buyer evaluates anyone in the stack. Eco's own five-layer stack (issuers, rails, orchestrators, custodians, apps) is the same move applied onchain.",
@@ -215,6 +228,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["treasury", "issuers", "payments"],
     breakStrength: 2,
+    hubs: ["https://www.bis.org/cpmi/publications.htm", "https://www.swift.com/news-events/news"],
     vocab: ["correspondent bank", "correspondent banking", "intermediary bank", "lifting fee", "de-risking"],
     parallel:
       "Cross-border value moves through a chain of intermediary banks, each taking a fee, adding a delay and applying its own cut-off times. Multi-hop routing with a toll booth at every hop.",
@@ -228,6 +242,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["treasury", "issuers", "solvers"],
     breakStrength: 3,
+    hubs: ["https://www.swift.com/news-events/news"],
     vocab: ["nostro", "vostro", "pre-funding", "prefunding", "pre-funded", "trapped capital", "intraday credit"],
     parallel:
       "To settle locally everywhere, a bank pre-funds accounts at every counterparty. The cost is capital sitting dead in dozens of places, sized for peak demand, earning nothing. Pre-funding is the single largest hidden cost in cross-border money movement.",
@@ -241,6 +256,10 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["treasury", "issuers"],
     breakStrength: 3,
+    hubs: [
+      "https://www.cls-group.com/insights/",
+      "https://www.federalreserve.gov/newsevents/speech",
+    ],
     vocab: ["fedwire", "chips", "herstatt", "payment-versus-payment", "settlement window", "central bank money"],
     parallel:
       "CLS exists for one reason: in a two-sided FX settlement, one leg can pay and the other can fail — Herstatt risk, named after the bank that proved it in 1974. An entire piece of global infrastructure exists to make both legs move together.",
@@ -254,6 +273,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["treasury", "payments"],
     breakStrength: 2,
+    hubs: ["https://www.bankofengland.co.uk/news/publications"],
     vocab: ["rtgs", "real-time gross settlement", "deferred net settlement", "multilateral netting", "liquidity savings"],
     parallel:
       "Systems net obligations because gross settlement is expensive in liquidity — you would need the full amount on hand for every transaction rather than the net difference. Netting is a liquidity-savings mechanism, not a speed one.",
@@ -267,6 +287,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "issuers"],
     breakStrength: 3,
+    hubs: ["https://www.swift.com/news-events/news"],
     vocab: ["swift", "mt103", "swift gpi", "payment instruction", "messaging layer"],
     parallel:
       "The most under-known fact in money movement: SWIFT moves MESSAGES, not money. The instruction and the settlement are two separate systems, and reconciling them is an entire job category employing thousands of people.",
@@ -282,6 +303,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "technical",
     icps: ["treasury", "solvers"],
     breakStrength: 3,
+    hubs: ["https://www.sec.gov/news/pressreleases"],
     vocab: [
       "best execution",
       "reg nms",
@@ -307,6 +329,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "technical",
     icps: ["treasury", "solvers", "issuers"],
     breakStrength: 2,
+    hubs: ["https://www.bis.org/statistics/index.htm"],
     vocab: ["liquidity aggregation", "request for quote", "streaming price", "last look", "bid-offer spread"],
     parallel:
       "Aggregate many liquidity providers behind one price. Streaming quotes for small size, request-for-quote for large size, and LP tiering so your best counterparties see your best flow.",
@@ -320,6 +343,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["treasury", "issuers"],
     breakStrength: 2,
+    hubs: ["https://www.newyorkfed.org/newsevents/news"],
     vocab: ["prime brokerage", "prime broker", "credit intermediation", "give-up"],
     parallel:
       "One credit relationship gives you access to many venues — the prime broker stands in the middle so you do not have to onboard, KYB and take credit exposure to every counterparty separately. This is exactly the 'one integration instead of KYB with twelve platforms' pitch, made forty years earlier.",
@@ -334,6 +358,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "technical",
     icps: ["treasury", "solvers"],
     breakStrength: 3,
+    hubs: ["https://www.sec.gov/news/pressreleases"],
     vocab: ["dark pool", "information leakage", "hidden liquidity", "systematic internaliser", "alternative trading system"],
     parallel:
       "Large orders hide from the public book because showing size moves the price against you. Whole venues exist purely to conceal intent until after the fill.",
@@ -350,6 +375,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "technical",
     icps: ["builders", "solvers", "agents"],
     breakStrength: 2,
+    hubs: ["https://www.fixtrading.org/news/"],
     vocab: ["fix protocol", "fix engine", "order management system", "wire format"],
     parallel:
       "A shared wire format is what let venues interoperate at all. FIX is boring, and it is the reason a single order-management system can talk to every exchange on earth.",
@@ -365,6 +391,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments"],
     breakStrength: 1,
+    hubs: ["https://www.ecb.europa.eu/press/pubbydate/html/index.en.html"],
     vocab: ["interchange", "interchange fee", "scheme fee", "merchant discount rate", "card acquiring"],
     parallel:
       "The clearest 'who pays and who captures' lesson in payments: the merchant pays, the issuing bank captures most of it, and the fee is set by a scheme neither party controls.",
@@ -378,6 +405,10 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "wallets"],
     breakStrength: 2,
+    hubs: [
+      "https://www.federalreserve.gov/newsevents/pressreleases.htm",
+      "https://www.europeanpaymentscouncil.eu/news-insights",
+    ],
     vocab: ["fednow", "sepa instant", "automated clearing house", "unified payments interface", "instant payment rail"],
     parallel:
       "Instant domestic rails already exist and they work extremely well. Pix and UPI are the proof that a well-designed public rail can move a whole country in a few years.",
@@ -392,6 +423,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["payments", "treasury", "agents"],
     breakStrength: 2,
+    hubs: ["https://www.swift.com/news-events/news", "https://www.bis.org/cpmi/publications.htm"],
     vocab: ["iso 20022", "structured remittance", "remittance data", "message schema"],
     parallel:
       "Global money movement is converging on structured, data-rich messages — the whole industry is mid-migration, and the payoff is that a payment can finally carry meaningful context.",
@@ -405,6 +437,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["issuers", "treasury"],
     breakStrength: 2,
+    hubs: ["https://www.dtcc.com/dtcc-connection"],
     vocab: ["central counterparty", "novation", "clearing house", "guarantee fund", "clearing member", "dtcc", "nscc"],
     parallel:
       "A central counterparty steps into the middle of every trade — novation — so neither side carries the other's settlement risk. Margin and a guarantee fund pay for that comfort.",
@@ -419,6 +452,7 @@ export const ANALOG_DEFS: AnalogDef[] = [
     side: "commercial",
     icps: ["issuers", "treasury"],
     breakStrength: 3,
+    hubs: ["https://www.dtcc.com/dtcc-connection", "https://www.sec.gov/news/pressreleases"],
     vocab: ["t+2", "t+1", "settlement cycle", "settlement fails", "buy-in", "trade affirmation"],
     parallel:
       "The most famous 'why does this take days?' hook in finance, and the one every reader already half-knows. Netting cycles, funding windows, fails and buy-ins.",

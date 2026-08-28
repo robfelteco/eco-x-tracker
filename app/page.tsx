@@ -459,6 +459,14 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
   if (r.guardrail) {
     badges.push({ label: "Guardrail", tone: "warn", title: r.guardrail });
   }
+  if (r.currentCount === 0 && r.canonicalCount > 0) {
+    badges.push({
+      label: "No fresh angle",
+      tone: "warn",
+      title:
+        "Only evergreen material behind this concept, so a draft can be correct but not timely. The sweep will keep looking.",
+    });
+  }
   if (r.needsSources) {
     badges.push({
       label: "Needs sources",
@@ -474,7 +482,18 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
       r.icpLabels.join(", "),
       r.useCount === 0 ? "never taught" : `taught ${r.useCount}×`,
       r.mentionCount > 0 ? `${r.mentionCount} passing mention${r.mentionCount === 1 ? "" : "s"}` : null,
-      r.sources.length ? `${r.sources.length} source${r.sources.length === 1 ? "" : "s"}` : "no sources",
+      // Tiers, not a total: "5 sources" hid the fact that all five were
+      // evergreen and nothing recent had come in.
+      r.sources.length
+        ? [
+            r.canonicalCount ? `${r.canonicalCount} canonical` : null,
+            r.currentCount ? `${r.currentCount} current` : null,
+            r.freshestDays != null ? `newest ${daysAgo(r.freshestDays)}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : "no sources",
+      r.lastSweptDays == null ? "never swept" : `swept ${daysAgo(r.lastSweptDays)}`,
       r.medianImpr != null ? `${compact(r.medianImpr)} median impr` : null,
       r.daysSinceLastUse != null ? `last ${daysAgo(r.daysSinceLastUse)}` : null,
     ]
@@ -493,6 +512,9 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
       publisher: s.publisher,
       kind: s.kind,
       seed: s.sourceOf === "seed",
+      tier: s.tier,
+      ageDays: s.ageDays,
+      factsCount: s.keyFacts.length,
     })),
     basePostText: null,
     angle: null,

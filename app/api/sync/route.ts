@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { runSync } from "@/lib/ingest";
 import { runRuleClassification, runClaudeClassification } from "@/lib/classify";
 import { attributeUses } from "@/lib/recUses";
+import { runAnalogSweep } from "@/lib/analogSweep";
 import { sql } from "@/lib/db";
 import { attributeArticles } from "@/lib/articleAttribution";
 import { syncDocPages, attributeDocPages } from "@/lib/docs";
@@ -29,6 +30,9 @@ async function handle(req: NextRequest) {
   const countParam = req.nextUrl.searchParams.get("count");
   const count = countParam ? Math.max(1, Math.min(3200, Number(countParam))) : undefined;
   const trigger = req.headers.get("x-vercel-cron") ? "cron" : "manual";
+  // The sweep runs LAST and is the only step that can be safely cut short, so
+  // it gets whatever is left of the function's 300s rather than a fixed slice.
+  const startedAt = Date.now();
   try {
     const result = await runSync({ trigger, backfill, count });
 
@@ -104,6 +108,51 @@ async function handle(req: NextRequest) {
       classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
     }
 
+    // ------------------------------------------------------------------
+    // The analog-source sweep. Keeps the curriculum's evidence base fresh
+    // instead of frozen at whatever the first pass happened to find.
+    //
+    // FOUR CONCEPTS, NOT TWENTY. Measured Firecrawl costs are 2 credits a
+    // search, 1 a map, 1 a scrape, so a concept costs ~9 and a twenty-concept
+    // fan-out would be ~180 credits a day against a 5,000/cycle plan. Four a
+    // day is ~36 and still refreshes every concept every five days. Override
+    // with ?sweep=N, or ?sweep=0 to skip it entirely.
+    //
+    // Last in the sync and deadline-bounded: if the ingest and classification
+    // steps ate the budget, the sweep stops cleanly and the concepts it did not
+    // reach sort first tomorrow, because the rotation is oldest-swept-first.
+    // ------------------------------------------------------------------
+    const sweepParam = req.nextUrl.searchParams.get("sweep");
+    const sweepCount = sweepParam == null ? 4 : Math.max(0, Math.min(20, Number(sweepParam) || 0));
+    let sweep: { concepts: number; added: number; credits: number; warnings: string[] } | null = null;
+    if (sweepCount > 0) {
+      try {
+        const budgetMs = 300_000 - (Date.now() - startedAt) - 20_000; // leave room to respond
+        if (budgetMs < 45_000) {
+          sweep = { concepts: 0, added: 0, credits: 0, warnings: ["skipped: not enough time left in this run"] };
+        } else {
+          const r = await runAnalogSweep({
+            concepts: sweepCount,
+            deadline: Date.now() + budgetMs,
+            maxScrapes: 4,
+          });
+          sweep = {
+            concepts: r.results.length,
+            added: r.totalAdded,
+            credits: r.totalCredits,
+            warnings: [...r.warnings, ...r.results.flatMap((x) => x.warnings)].slice(0, 12),
+          };
+        }
+      } catch (err) {
+        sweep = {
+          concepts: 0,
+          added: 0,
+          credits: 0,
+          warnings: [err instanceof Error ? err.message.slice(0, 200) : String(err)],
+        };
+      }
+    }
+
     return NextResponse.json(
       {
         ...result,
@@ -111,6 +160,7 @@ async function handle(req: NextRequest) {
         shelves,
         articlesMatched,
         attributed,
+        sweep,
       },
       { status: result.ok ? 200 : 207 },
     );

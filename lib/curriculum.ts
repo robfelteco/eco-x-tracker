@@ -78,6 +78,13 @@ export interface CurriculumRow {
   score: number;
   /** No verified source material — drafting is blocked until this is fixed. */
   needsSources: boolean;
+  canonicalCount: number;
+  currentCount: number;
+  /** Age in days of the freshest current source. Null when there are none. */
+  freshestDays: number | null;
+  /** When the sweep last looked at this concept, and how it went. */
+  lastSweptDays: number | null;
+  sweepStatus: string | null;
   /** Plain-English "why this score", same contract as Recommendation.scoreReasons. */
   reasons: string[];
 }
@@ -85,6 +92,9 @@ export interface CurriculumRow {
 export interface CurriculumMeta {
   /** Concepts with no verified source material — these cannot be drafted yet. */
   unsourced: number;
+  /** Have a mechanism source but nothing recent: teachable, not timely. */
+  canonicalOnly: number;
+  neverSwept: number;
   totalConcepts: number;
   taught: number;
   neverTaught: number;
@@ -130,6 +140,17 @@ function coverageWeight(useCount: number, daysSince: number | null): { w: number
 
 export async function getCurriculumShelf(): Promise<CurriculumShelf> {
   const sourcesByConcept = await getAllSources();
+
+  // Sweep state, so a concept can say when it was last looked at. A shelf that
+  // shows sources but not their age is how the base went stale unnoticed the
+  // first time.
+  const sweepRows = await sql<{ analogId: string; days: number | null; status: string | null }>`
+    SELECT analog_id AS "analogId",
+           EXTRACT(DAY FROM now() - last_swept_at)::int AS days,
+           last_status AS status
+    FROM analog_sweep_state
+  `;
+  const sweepBy = new Map(sweepRows.map((r) => [r.analogId, r]));
 
   // One query for every analog-tagged post, with its latest impressions. Small
   // by construction — the whole point of this shelf is that very few posts
@@ -232,6 +253,15 @@ export async function getCurriculumShelf(): Promise<CurriculumShelf> {
       guardrail: def.guardrail ?? null,
       sources: sourcesByConcept.get(def.id) ?? [],
       needsSources: (sourcesByConcept.get(def.id) ?? []).length === 0,
+      canonicalCount: (sourcesByConcept.get(def.id) ?? []).filter((x) => x.tier === "canonical").length,
+      currentCount: (sourcesByConcept.get(def.id) ?? []).filter((x) => x.tier === "current").length,
+      freshestDays: (() => {
+        const cur = (sourcesByConcept.get(def.id) ?? []).filter((x) => x.tier === "current");
+        if (!cur.length) return null;
+        return Math.min(...cur.map((x) => x.ageDays ?? 9999));
+      })(),
+      lastSweptDays: sweepBy.get(def.id)?.days ?? null,
+      sweepStatus: sweepBy.get(def.id)?.status ?? null,
       posts: mine.map((m) => ({
         id: m.id,
         url: m.url,
@@ -275,6 +305,10 @@ export async function getCurriculumShelf(): Promise<CurriculumShelf> {
       taught: shelf.filter((r) => r.useCount > 0).length,
       neverTaught: shelf.filter((r) => r.useCount === 0).length,
       unsourced: shelf.filter((r) => r.needsSources).length,
+      // A concept with only evergreen material can still be taught, it just
+      // cannot be made timely. Worth seeing at a glance.
+      canonicalOnly: shelf.filter((r) => r.currentCount === 0 && r.canonicalCount > 0).length,
+      neverSwept: shelf.filter((r) => r.lastSweptDays == null).length,
       coldDoors,
       bySide,
     },

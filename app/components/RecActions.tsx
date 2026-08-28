@@ -44,7 +44,16 @@ export interface Target {
   // Verified source material behind a curriculum concept. Listed on the row
   // because the operator should be able to see what a draft will be arguing
   // from — and notice when the answer is "nothing" — before spending a draft.
-  sources?: { title: string; url: string; publisher: string | null; kind: string | null; seed: boolean }[];
+  sources?: {
+    title: string;
+    url: string;
+    publisher: string | null;
+    kind: string | null;
+    seed: boolean;
+    tier: string;
+    ageDays: number | null;
+    factsCount: number;
+  }[];
   basePostText?: string | null;
   // Small coloured chip on the row — "Hero", "Never posted", "Has file".
   badges?: { label: string; tone: "good" | "warn" | "mute"; title?: string }[];
@@ -103,6 +112,8 @@ export interface VideosMeta {
 // behaviour, and it is invisible in any post-derived metric.
 export interface CurriculumMeta {
   unsourced: number;
+  canonicalOnly: number;
+  neverSwept: number;
   totalConcepts: number;
   taught: number;
   neverTaught: number;
@@ -130,12 +141,12 @@ interface CopyOption {
   angle: string;
   text: string;
   rationale: string;
-  // Curriculum drafts carry their citation. The body credits the source by
-  // name; the link rides in a separate first reply, because in-body links cost
-  // reach.
+  // Curriculum drafts carry their citation. The link is IN the body now, so
+  // there is one thing to copy and one thing to post.
   sourceTitle?: string;
   sourceUrl?: string;
-  replyText?: string;
+  score?: number;
+  scoreNote?: string;
 }
 
 function compact(n: number | null | undefined): string {
@@ -304,10 +315,17 @@ export function RecActions({
       const data = await res.json();
       if (data.ok) {
         setSourcesByKey((m) => ({ ...m, [t.key]: data.sources ?? [] }));
-        const dropped = (data.rejected ?? []).length;
         setSrcNoteByKey((n) => ({
           ...n,
-          [t.key]: `${data.added} verified${dropped ? ` · ${dropped} dropped (URL didn't resolve)` : ""}`,
+          [t.key]: [
+            `+${data.added} kept`,
+            data.rejected ? `${data.rejected} rejected` : null,
+            data.scanned ? `${data.scanned} scanned` : null,
+            data.credits ? `${data.credits} credits` : null,
+            data.partial ? "partial, ran out of time" : null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
         }));
         startTransition(() => router.refresh());
       } else setSrcErrByKey((e) => ({ ...e, [t.key]: data.error || "Source search failed" }));
@@ -391,60 +409,62 @@ export function RecActions({
                   }`}
                 >
                   <div className="mb-1 flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
-                      <span className={`inline-block h-2.5 w-2.5 rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
-                      {o.angle}
+                    <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
+                      <span className={`inline-block h-2.5 w-2.5 flex-none rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
+                      <span className="truncate">{o.angle}</span>
+                      {o.score != null && (
+                        <span
+                          title={
+                            o.scoreNote
+                              ? `Self-scored against the X ranking signals. Weakest: ${o.scoreNote}`
+                              : "Self-scored against the X ranking signals (citability, reply pull, dwell, hook honesty)."
+                          }
+                          className={`flex-none cursor-help rounded-full px-1.5 py-0.5 tabular-nums ${
+                            o.score >= 80
+                              ? "bg-emerald-400/15 text-emerald-300"
+                              : o.score >= 65
+                                ? "bg-white/[0.06] text-white/55"
+                                : "bg-amber-400/15 text-amber-300"
+                          }`}
+                        >
+                          {o.score}
+                        </span>
+                      )}
                     </span>
                     <button
                       onClick={(e) => { e.stopPropagation(); copy(o.text, `${key}-post-${i}`); }}
                       className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
                     >
-                      {copiedId === `${key}-post-${i}` ? "Copied ✓" : "Copy post"}
+                      {copiedId === `${key}-post-${i}` ? "Copied ✓" : "Copy"}
                     </button>
                   </div>
                   <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
                   {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
 
-                  {/* The citation, and the reply that carries the link. Kept
-                      visually separate from the post body because they are two
-                      separate things to publish: the body credits the source by
-                      name, the reply carries the URL. An in-body link would cost
-                      reach, which is why they are split at all. */}
+                  {/* The citation. One line, not a second thing to publish:
+                      the link is already in the post body above, so this is a
+                      provenance label the operator can click to check the claim
+                      before posting. */}
                   {o.sourceTitle && (
-                    <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="font-mono text-[9.5px] uppercase tracking-wider text-white/30">Argued from</div>
-                          <div className="mt-0.5 text-[11.5px] leading-snug text-white/70">
-                            {o.sourceUrl ? (
-                              <a
-                                href={o.sourceUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="underline decoration-white/20 underline-offset-2 hover:text-eco-lightblue"
-                              >
-                                {o.sourceTitle}
-                              </a>
-                            ) : (
-                              o.sourceTitle
-                            )}
-                          </div>
-                        </div>
-                        {o.replyText && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); copy(o.replyText!, `${key}-reply-${i}`); }}
-                            className="flex-none rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
+                    <div className="mt-2 flex items-baseline gap-2 border-t border-white/[0.06] pt-1.5">
+                      <span className="flex-none font-mono text-[9.5px] uppercase tracking-wider text-white/30">
+                        Argued from
+                      </span>
+                      <span className="min-w-0 text-[11.5px] leading-snug text-white/60">
+                        {o.sourceUrl ? (
+                          <a
+                            href={o.sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="underline decoration-white/20 underline-offset-2 hover:text-eco-lightblue"
                           >
-                            {copiedId === `${key}-reply-${i}` ? "Copied ✓" : "Copy reply"}
-                          </button>
+                            {o.sourceTitle}
+                          </a>
+                        ) : (
+                          o.sourceTitle
                         )}
-                      </div>
-                      {o.replyText && (
-                        <p className="mt-1.5 whitespace-pre-wrap break-words border-l-2 border-eco-lightblue/40 pl-2 text-[11.5px] text-white/50">
-                          {o.replyText}
-                        </p>
-                      )}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -530,10 +550,10 @@ export function RecActions({
             <button
               onClick={() => findSources(t)}
               disabled={findingKey === t.key}
-              title="Search for authoritative explainers, reports and primers on this mechanism. Every URL is checked before it is stored — a citation that 404s is worse than none."
+              title="Run the same sweep the daily cron runs: Firecrawl search plus the institution's own publication hub, then a keep/reject pass. Costs about 9-13 Firecrawl credits."
               className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/60 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
             >
-              {findingKey === t.key ? "Searching…" : "Find sources"}
+              {findingKey === t.key ? "Sweeping…" : "Sweep now"}
             </button>
           )}
           {t.analogId && (
@@ -575,7 +595,7 @@ export function RecActions({
               {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
               {srcs.length === 0 ? (
                 <p className="text-[11px] text-amber-300/70">
-                  Nothing citable yet — drafting is blocked until this concept has a source.
+                  Nothing citable yet. Drafting is blocked until this concept has a source.
                 </p>
               ) : (
                 <ul className="space-y-0.5">
@@ -592,6 +612,27 @@ export function RecActions({
                       {sr.publisher && <span className="text-white/40"> — {sr.publisher}</span>}
                       {sr.kind && sr.kind !== "article" && (
                         <span className="ml-1.5 font-mono text-[9.5px] uppercase tracking-wider text-white/30">{sr.kind}</span>
+                      )}
+                      <span
+                        title={
+                          sr.tier === "current"
+                            ? "Recent material. This is what lets a draft be timely."
+                            : "Explains the mechanism itself. This is what makes a draft correct."
+                        }
+                        className={`ml-1.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] ${
+                          sr.tier === "current" ? "bg-eco-lightblue/15 text-eco-lightblue" : "bg-white/[0.06] text-white/40"
+                        }`}
+                      >
+                        {sr.tier}
+                        {sr.tier === "current" && sr.ageDays != null ? ` ${sr.ageDays}d` : ""}
+                      </span>
+                      {sr.factsCount > 0 && (
+                        <span
+                          className="ml-1 font-mono text-[9.5px] text-white/25"
+                          title={`${sr.factsCount} checkable claims extracted from this piece.`}
+                        >
+                          {sr.factsCount}f
+                        </span>
                       )}
                       {sr.seed && (
                         <span
@@ -935,6 +976,19 @@ function CurriculumHeadline({ meta }: { meta: CurriculumMeta }) {
           </span>
         </span>
       ))}
+      {meta.canonicalOnly > 0 && (
+        <span
+          className="text-white/45"
+          title="These have a mechanism source but nothing recent, so they can be taught but not made timely."
+        >
+          <span className="font-mono tabular-nums">{meta.canonicalOnly}</span> evergreen-only
+        </span>
+      )}
+      {meta.neverSwept > 0 && (
+        <span className="text-white/45" title="The daily sweep has not reached these yet. It rotates oldest-first.">
+          <span className="font-mono tabular-nums">{meta.neverSwept}</span> never swept
+        </span>
+      )}
       {meta.unsourced > 0 && (
         <span
           className="text-amber-300/70"
