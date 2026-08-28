@@ -564,3 +564,28 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_id         bigint REFERENCES vi
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_match      text;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_confidence real;
 CREATE INDEX IF NOT EXISTS posts_video_idx ON posts (video_id);
+
+-- ---------------------------------------------------------------------------
+-- Migration 009 — the ANALOG dimension (the education curriculum).
+--
+-- Jay's brief: "get more into ICP education ... shine a light in the dark area
+-- of 'traditional money movement tech'." The finding that shaped this column:
+-- broad_educational is our largest pillar (71 posts) and 100% of it is market
+-- NEWS — Mastercard settling in six stablecoins, BNY and Circle, the a16z
+-- piece. None of it teaches a MECHANISM.
+--
+-- Deliberately NOT a tenth content_template. Two reasons:
+--   1. Analog education already fits broad_educational's definition — external,
+--      mechanism-level, Eco never named in the body. It is a kind of post we
+--      have not made, not a new pillar.
+--   2. A new enum value would need a migration AND a reclassify pass over 333
+--      posts, for no gain. Instead broad_educational renders as two LANES:
+--      "market news" (everything today) and "analog curriculum" (analog_id set).
+--
+-- Nullable by design. It will be null for essentially every existing post —
+-- that is the finding, not a bug, and it makes the coverage board honest on
+-- day one. Registry ids live in lib/analogs.ts (text, not an enum, same as
+-- products/icp — the curriculum will grow faster than a DDL cycle).
+-- ---------------------------------------------------------------------------
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS analog_id text;
+CREATE INDEX IF NOT EXISTS posts_analog_idx ON posts (analog_id) WHERE analog_id IS NOT NULL;

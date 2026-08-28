@@ -5,6 +5,7 @@ import { productLabel, SHAPE_BY_ID, PRODUCT_POST_SHAPES } from "./products.ts";
 import { getArticleShelf, type ArticleShelfRow } from "./articles.ts";
 import { getDocShelf, getHomepagePenalty, type DocShelfRow, type HomepagePenalty } from "./docs.ts";
 import { getVideoShelf, type VideoShelfRow } from "./videos.ts";
+import { getCurriculumShelf, type CurriculumShelf } from "./curriculum.ts";
 import { getRecDrivenPerf } from "./recUses.ts";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
@@ -366,9 +367,13 @@ export interface Insights {
   docPages: DocShelfRow[];
   homepagePenalty: HomepagePenalty;
   videos: VideoShelfRow[];
+  // The curriculum shelf. Same registry-first shape as docs/videos, and for the
+  // same reason: its most valuable rows are the concepts with no post attached.
+  curriculum: CurriculumShelf;
 }
 
 export type { DocShelfRow, HomepagePenalty } from "./docs.ts";
+export type { CurriculumRow, CurriculumMeta, CurriculumShelf } from "./curriculum.ts";
 export type { VideoShelfRow } from "./videos.ts";
 
 // Low-effort, high-frequency formats Jay flags as "easy wins" — a quick post
@@ -903,10 +908,11 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   // The two registry-first shelves. Read unconditionally rather than only when
   // their pillar is on screen: both are small, and the Prioritize page renders
   // every pillar's card at once.
-  const [docPages, homepagePenalty, videos] = await Promise.all([
+  const [docPages, homepagePenalty, videos, curriculum] = await Promise.all([
     getDocShelf(),
     getHomepagePenalty(),
     getVideoShelf(),
+    getCurriculumShelf(),
   ]);
 
   return {
@@ -918,6 +924,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     docPages,
     homepagePenalty,
     videos,
+    curriculum,
   };
 }
 

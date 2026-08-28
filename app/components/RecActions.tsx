@@ -35,6 +35,12 @@ export interface Target {
   articleId?: number | null;
   docPageId?: number | null;
   videoId?: number | null;
+  // A curriculum concept (lib/analogs.ts). Turns the draft into a teaching post.
+  analogId?: string | null;
+  // A short body under the row. The curriculum shelf uses it to show WHERE THE
+  // ANALOGY BREAKS — which is both the point of the concept and the thing the
+  // operator most needs to read before drafting from it.
+  note?: string | null;
   basePostText?: string | null;
   // Small coloured chip on the row — "Hero", "Never posted", "Has file".
   badges?: { label: string; tone: "good" | "warn" | "mute"; title?: string }[];
@@ -88,6 +94,27 @@ export interface VideosMeta {
   withTranscript: number;
 }
 
+// Coverage headline for the curriculum shelf. Deliberately counts CONCEPTS and
+// DOORS, not posts — "19 of 20 never taught" is the number that should change
+// behaviour, and it is invisible in any post-derived metric.
+export interface CurriculumMeta {
+  totalConcepts: number;
+  taught: number;
+  neverTaught: number;
+  coldDoors: string[];
+  bySide: { side: string; total: number; taught: number }[];
+}
+
+export interface MinedQuestion {
+  question: string;
+  askedWhere: string;
+  frequency: string;
+  answeredWell: boolean;
+  angle: string;
+  asker: string;
+  source?: { title: string; url: string };
+}
+
 export interface BroadEdData {
   byType: { mediaType: string; count: number; medianImpr: number | null }[];
   topEntities: { entity: string; label: string; count: number; medianImpr: number | null }[];
@@ -116,6 +143,8 @@ export function RecActions({
   docsMeta,
   videosMeta,
   broad,
+  curriculum = [],
+  curriculumMeta,
   recDrivenCount = 0,
   recDrivenVsBaseline = null,
 }: {
@@ -128,6 +157,8 @@ export function RecActions({
   docsMeta?: DocsMeta;
   videosMeta?: VideosMeta;
   broad?: BroadEdData;
+  curriculum?: LaneGroup[];
+  curriculumMeta?: CurriculumMeta;
   recDrivenCount?: number;
   recDrivenVsBaseline?: number | null;
 }) {
@@ -154,6 +185,15 @@ export function RecActions({
   // Which lane is open (docs / videos modes). Opens on the top-ranked lane,
   // which is the coldest audience or series — the answer to "what now".
   const [openLane, setOpenLane] = useState<string | null>(lanes[0]?.key ?? null);
+  // The curriculum accordion is independent of `openLane` — both can be on
+  // screen at once inside the Broad Educational card (news lane + teach lane).
+  const [openCurr, setOpenCurr] = useState<string | null>(curriculum[0]?.key ?? null);
+
+  // Question mining, keyed by concept target. Demand discovery, not news
+  // discovery: what people ASK about a mechanism, ranked unanswered-first.
+  const [questionsByKey, setQuestionsByKey] = useState<Record<string, MinedQuestion[]>>({});
+  const [miningKey, setMiningKey] = useState<string | null>(null);
+  const [mineErrByKey, setMineErrByKey] = useState<Record<string, string>>({});
 
   const [marking, setMarking] = useState(false);
   const [markedKey, setMarkedKey] = useState<string | null>(null);
@@ -178,7 +218,12 @@ export function RecActions({
           articleId: t.articleId ?? null,
           docPageId: t.docPageId ?? null,
           videoId: t.videoId ?? null,
-          shape: shape ?? shapeByKey[t.key] ?? null,
+          analogId: t.analogId ?? null,
+          // The seven product shapes and the six teaching shapes are different
+          // vocabularies; a target is only ever one kind, so the picked value
+          // routes to whichever field applies.
+          eduShape: t.analogId ? (shape ?? shapeByKey[t.key] ?? null) : null,
+          shape: t.analogId ? null : (shape ?? shapeByKey[t.key] ?? null),
           angle: t.angle ?? null,
           basePostText: t.basePostText ?? null,
           priorTexts: t.priorTexts ?? [],
@@ -227,6 +272,26 @@ export function RecActions({
     }
   }
 
+  async function mine(t: Target) {
+    if (!t.analogId) return;
+    setMiningKey(t.key);
+    setMineErrByKey((e) => ({ ...e, [t.key]: "" }));
+    try {
+      const res = await fetch("/api/questions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ analogId: t.analogId }),
+      });
+      const data = await res.json();
+      if (data.ok) setQuestionsByKey((q) => ({ ...q, [t.key]: data.questions ?? [] }));
+      else setMineErrByKey((e) => ({ ...e, [t.key]: data.error || "Question mining failed" }));
+    } catch (e) {
+      setMineErrByKey((err) => ({ ...err, [t.key]: e instanceof Error ? e.message : "Question mining failed" }));
+    } finally {
+      setMiningKey(null);
+    }
+  }
+
   async function runDiscover() {
     setDiscovering(true);
     setDiscoverErr(null);
@@ -255,6 +320,69 @@ export function RecActions({
     } finally {
       setDiscovering(false);
     }
+  }
+
+  // Extracted so drafts can render in TWO places: under a target row, and under
+  // an individual mined question (which owns its own key, because answering
+  // "why does a wire take two days" is a different post from a general T+2
+  // explainer and should not overwrite it).
+  function renderDrafts(key: string, target: Target) {
+    const opts = optionsByKey[key];
+    const err = errByKey[key];
+    if (!opts && !err) return null;
+    return (
+      <div className="space-y-2 border-t border-white/[0.06] px-3 pb-3 pt-2">
+
+            {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
+            {opts?.map((o, i) => {
+              const isSel = selected?.key === key && selected.idx === i;
+              return (
+                <div
+                  key={i}
+                  onClick={() => setSelected({ key: key, idx: i })}
+                  className={`cursor-pointer rounded-lg border p-2.5 transition ${
+                    isSel ? "border-eco-lightblue/50 bg-eco-lightblue/[0.06]" : "border-white/10 bg-white/[0.02] hover:border-white/25"
+                  }`}
+                >
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
+                      <span className={`inline-block h-2.5 w-2.5 rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
+                      {o.angle}
+                    </span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); copy(o.text, i); }}
+                      className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
+                    >
+                      {copiedIdx === i ? "Copied ✓" : "Copy"}
+                    </button>
+                  </div>
+                  <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
+                  {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
+                </div>
+              );
+            })}
+
+            {opts && selected?.key === key && (
+              markedKey === key ? (
+                <span className="inline-block rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                  Marked as used ✓ — it&apos;ll show in History
+                </span>
+              ) : (
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={() => markUsed(target, opts[selected.idx])}
+                    disabled={marking}
+                    className="rounded-full bg-eco-blue px-3.5 py-1.5 text-xs font-medium text-white transition hover:brightness-110 disabled:opacity-50"
+                  >
+                    {marking ? "Marking…" : "Mark as used"}
+                  </button>
+                  <span className="text-[11px] text-white/35">once you post this draft</span>
+                </div>
+              )
+            )}
+            {opts && opts.length > 0 && <p className="text-[10px] text-white/30">Starting points — take them to 90/10 before posting.</p>}
+      </div>
+    );
   }
 
   function renderTarget(t: Target, shapePicker = false) {
@@ -309,6 +437,16 @@ export function RecActions({
             </div>
             {t.sublabel && <div className="mt-0.5 truncate font-mono text-[10px] text-white/35">{t.sublabel}</div>}
           </div>
+          {t.analogId && (
+            <button
+              onClick={() => mine(t)}
+              disabled={miningKey === t.key}
+              title="Search YouTube, X, Reddit and forums for the questions people actually ask about this mechanism. Unanswered and recurring rank first."
+              className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/60 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+            >
+              {miningKey === t.key ? "Mining…" : questionsByKey[t.key] ? "Re-mine" : "Find questions"}
+            </button>
+          )}
           <button
             onClick={() => draft(t)}
             disabled={isLoading}
@@ -318,9 +456,83 @@ export function RecActions({
           </button>
         </div>
 
+        {/* Where the analogy breaks. Shown unprompted rather than behind a
+            disclosure: this is the actual content of the concept, and reading it
+            is the point of the shelf even on the days you don't draft from it. */}
+        {t.note && (
+          <div className="border-t border-white/[0.06] px-3 py-2">
+            <span className="mr-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/70">Breaks</span>
+            <span className="text-[12px] leading-relaxed text-white/60">{t.note}</span>
+          </div>
+        )}
+
+        {/* Mined questions. Each one is itself draftable — the question becomes
+            the angle, which is the whole point: we are answering a real ask, not
+            publishing an explainer into the void. */}
+        {(questionsByKey[t.key] || mineErrByKey[t.key] || miningKey === t.key) && (
+          <div className="space-y-1.5 border-t border-white/[0.06] px-3 py-2">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-white/30">
+              Questions people ask
+              {miningKey === t.key && <span className="ml-2 normal-case tracking-normal text-white/40">searching…</span>}
+            </div>
+            {mineErrByKey[t.key] && <p className="font-mono text-[11px] text-red-400">{mineErrByKey[t.key]}</p>}
+            {questionsByKey[t.key]?.length === 0 && (
+              <p className="text-[11px] text-white/35">Nothing came back — try re-mining.</p>
+            )}
+            {questionsByKey[t.key]?.map((q, i) => (
+              <div key={i} className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[13px] text-white/85">{q.question}</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-white/35">
+                      {!q.answeredWell && (
+                        <span
+                          className="rounded-full bg-emerald-400/15 px-1.5 py-0.5 text-emerald-300"
+                          title="No good public answer exists — this is the opening."
+                        >
+                          Unanswered
+                        </span>
+                      )}
+                      {q.frequency === "recurring" && (
+                        <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-white/50">Recurring</span>
+                      )}
+                      {q.asker && <span>{q.asker}</span>}
+                      {q.askedWhere && <span>· {q.askedWhere}</span>}
+                      {q.source?.url && (
+                        <a href={q.source.url} target="_blank" rel="noreferrer" className="underline hover:text-eco-lightblue">
+                          source
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() =>
+                      draft({
+                        ...t,
+                        key: `${t.key}-q${i}`,
+                        angle: q.angle,
+                        basePostText: `Answer this question: "${q.question}"`,
+                      })
+                    }
+                    disabled={loadingKey === `${t.key}-q${i}`}
+                    className="flex-none rounded-full border border-white/15 px-2.5 py-1 text-[11px] font-medium text-white/70 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+                  >
+                    {loadingKey === `${t.key}-q${i}` ? "Drafting…" : "Answer it"}
+                  </button>
+                </div>
+                {q.angle && <p className="mt-1 text-[11px] italic text-white/40">{q.angle}</p>}
+                {/* The draft for THIS question renders under it, not under the concept. */}
+                {activeKey === `${t.key}-q${i}` && renderDrafts(`${t.key}-q${i}`, { ...t, key: `${t.key}-q${i}`, angle: q.angle })}
+              </div>
+            ))}
+          </div>
+        )}
+
         {shapePicker && (
           <div className="flex flex-wrap items-center gap-1 border-t border-white/[0.06] px-3 py-1.5">
-            <span className="mr-1 font-mono text-[10px] uppercase tracking-wider text-white/25">Shape</span>
+            <span className="mr-1 font-mono text-[10px] uppercase tracking-wider text-white/25">
+              {t.analogId ? "Teaching shape" : "Shape"}
+            </span>
             <button
               onClick={() => setShapeByKey((m) => ({ ...m, [t.key]: "" }))}
               className={`rounded-md border px-1.5 py-0.5 text-[11px] transition ${
@@ -329,7 +541,7 @@ export function RecActions({
             >
               Any
             </button>
-            {SHAPE_CHOICES.map((sh) => (
+            {(t.analogId ? EDU_SHAPE_CHOICES : SHAPE_CHOICES).map((sh) => (
               <button
                 key={sh.id}
                 onClick={() => setShapeByKey((m) => ({ ...m, [t.key]: sh.id }))}
@@ -345,58 +557,7 @@ export function RecActions({
           </div>
         )}
 
-        {isActive && (opts || err) && (
-          <div className="space-y-2 border-t border-white/[0.06] px-3 pb-3 pt-2">
-            {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
-            {opts?.map((o, i) => {
-              const isSel = selected?.key === t.key && selected.idx === i;
-              return (
-                <div
-                  key={i}
-                  onClick={() => setSelected({ key: t.key, idx: i })}
-                  className={`cursor-pointer rounded-lg border p-2.5 transition ${
-                    isSel ? "border-eco-lightblue/50 bg-eco-lightblue/[0.06]" : "border-white/10 bg-white/[0.02] hover:border-white/25"
-                  }`}
-                >
-                  <div className="mb-1 flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
-                      <span className={`inline-block h-2.5 w-2.5 rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
-                      {o.angle}
-                    </span>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); copy(o.text, i); }}
-                      className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-white/60 transition hover:border-white/30 hover:text-white/90"
-                    >
-                      {copiedIdx === i ? "Copied ✓" : "Copy"}
-                    </button>
-                  </div>
-                  <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
-                  {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
-                </div>
-              );
-            })}
-
-            {opts && selected?.key === t.key && (
-              markedKey === t.key ? (
-                <span className="inline-block rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                  Marked as used ✓ — it&apos;ll show in History
-                </span>
-              ) : (
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    onClick={() => markUsed(t, opts[selected.idx])}
-                    disabled={marking}
-                    className="rounded-full bg-eco-blue px-3.5 py-1.5 text-xs font-medium text-white transition hover:brightness-110 disabled:opacity-50"
-                  >
-                    {marking ? "Marking…" : "Mark as used"}
-                  </button>
-                  <span className="text-[11px] text-white/35">once you post this draft</span>
-                </div>
-              )
-            )}
-            {opts && opts.length > 0 && <p className="text-[10px] text-white/30">Starting points — take them to 90/10 before posting.</p>}
-          </div>
-        )}
+        {isActive && renderDrafts(t.key, t)}
       </div>
     );
   }
@@ -418,7 +579,8 @@ export function RecActions({
             {mode === "chains" && "Pick a chain angle and draft copy for it."}
             {mode === "products" && "Pick the product, then the piece behind it. Shapes show which angle has gone cold."}
             {mode === "articles" && "One row per article, not per post — the count is how many times we've already run it."}
-            {isBroadDiscovery && "Discover fresh source material, then draft from it. (We never reshare a piece.)"}
+            {isBroadDiscovery &&
+              "Two jobs in one pillar: teach a mechanism nobody has explained, or find fresh market news. (We never reshare a piece.)"}
             {isQuoteDiscovery && "Quote cards are used once, so there is nothing to re-run — this lane finds new ones."}
             {mode === "docs" &&
               "Pick the audience, then the docs page. Every page on docs.eco.com is here — the ones you've never linked rank first."}
@@ -430,6 +592,51 @@ export function RecActions({
       </div>
 
       {isQuoteDiscovery && <QuoteDiscovery />}
+
+      {/* ------------------------------------------------------------------
+          Broad Educational renders as TWO LANES, because it is doing two jobs.
+          Everything in this pillar today is market news; a curriculum post is a
+          different act — it teaches a mechanism instead of reporting a signal.
+          They share a pillar (an analog explainer IS external, mechanism-level,
+          Eco-unnamed content) but they do not share a clock: news decays, a
+          concept we have never taught does not.
+          ------------------------------------------------------------------ */}
+      {isBroadDiscovery && curriculum.length > 0 && (
+        <div className="mb-4">
+          <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">Lane 1 · Analog curriculum</span>
+            <span className="text-[11px] text-white/30">
+              teach the mechanism the market runs on — ranked by what we have never covered
+            </span>
+          </div>
+          {curriculumMeta && <CurriculumHeadline meta={curriculumMeta} />}
+          <div className="space-y-1.5">
+            {curriculum.map((lane) => {
+              const open = openCurr === lane.key;
+              return (
+                <NestedDisclosure
+                  key={lane.key}
+                  label={lane.label}
+                  sublabel={lane.sublabel}
+                  count={lane.targets.length}
+                  open={open}
+                  onToggle={() => setOpenCurr(open ? null : lane.key)}
+                >
+                  {lane.hint && <p className="text-[11px] text-white/40">{lane.hint}</p>}
+                  <div className="space-y-1.5">{lane.targets.map((t) => renderTarget(t, true))}</div>
+                </NestedDisclosure>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {isBroadDiscovery && (
+        <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">Lane 2 · Market news</span>
+          <span className="text-[11px] text-white/30">what is happening right now — ranked by freshness</span>
+        </div>
+      )}
 
       {isBroadDiscovery && broad && <WhatWorked broad={broad} />}
       {isBroadDiscovery && (
@@ -539,6 +746,50 @@ const SHAPE_CHOICES = [
   { id: "icp_objection", label: "ICP objection" },
   { id: "article_amplifier", label: "Article amplifier" },
 ];
+
+// Mirrors EDUCATION_SHAPES in lib/analogs.ts, duplicated as a plain literal for
+// the same reason as above — this is a client component and importing the
+// registry would ship every concept's parallel and break text to the browser.
+// These are narrative moves lifted from the tradfi explainers themselves, not
+// the product-post shapes: "Problem → mechanism" means something different when
+// the subject is correspondent banking than when it is Flash Intents.
+const EDU_SHAPE_CHOICES = [
+  { id: "kill_the_model", label: "Kill the naive model" },
+  { id: "condition_then_discipline", label: "Condition → discipline" },
+  { id: "three_variable_tradeoff", label: "Three-variable tradeoff" },
+  { id: "hidden_cost", label: "Price the hidden cost" },
+  { id: "integrate_vs_operate", label: "Integrate vs operate" },
+  { id: "closed_loop", label: "Closed loop" },
+];
+
+// Coverage headline. Concepts and doors, not posts — the honest read of this
+// shelf on day one is "19 of 20 never taught", and no post-derived metric can
+// say that, because the posts do not exist yet.
+function CurriculumHeadline({ meta }: { meta: CurriculumMeta }) {
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2 text-[11px]">
+      <span className="text-white/60">
+        <span className="font-mono tabular-nums text-white/85">
+          {meta.neverTaught}/{meta.totalConcepts}
+        </span>{" "}
+        concepts never taught
+      </span>
+      {meta.bySide.map((s) => (
+        <span key={s.side} className="text-white/45">
+          {s.side === "commercial" ? "Commercial" : "Technical"} door{" "}
+          <span className="font-mono tabular-nums text-white/70">
+            {s.taught}/{s.total}
+          </span>
+        </span>
+      ))}
+      {meta.coldDoors.length > 0 && (
+        <span className="text-amber-300/70" title="No concept naming these audiences has ever been taught.">
+          Never reached: {meta.coldDoors.join(", ")}
+        </span>
+      )}
+    </div>
+  );
+}
 
 // The one number that should change behaviour in this pillar, stated plainly.
 // The homepage habit costs roughly half the reach of a deep link, and it is the

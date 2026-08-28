@@ -3,6 +3,11 @@ import { auth } from "@/auth";
 // Everything is behind Google sign-in except the paths in the matcher's
 // negative lookahead below.
 //
+// This is Next 16's "proxy" file convention. It was `middleware.ts` until the
+// rename; under Turbopack dev the deprecated name failed outright with
+// "Cannot find the middleware module", so the rename is load-bearing, not
+// cosmetic.
+//
 // /api/sync is deliberately NOT protected here: Vercel Cron calls it with no
 // user session, and it already authenticates itself (CRON_SECRET bearer token
 // or the x-vercel-cron header — see app/api/sync/route.ts). Putting it behind

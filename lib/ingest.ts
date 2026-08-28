@@ -11,6 +11,7 @@ import {
 import { runRuleClassification, runClaudeClassification } from "./classify.ts";
 import { enrichByIds, enrichQuotedImages } from "./enrich.ts";
 import { extractDimensions } from "./dimensions.ts";
+import { detectAnalog } from "./analogs.ts";
 
 // Posts younger than this are eligible for a non_public_metrics attempt and for
 // daily re-snapshotting (metrics move fast early, then settle).
@@ -50,13 +51,21 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
       mediaType: p.mediaType,
       linkTitle: p.link_title,
     });
+    // Which tradfi analog concept, if any, this post actually teaches. Runs over
+    // the link card too — an external explainer's title is usually where the
+    // concept name lives, not in our own copy above it. Recomputed on every
+    // upsert like the other dimensions, so widening lib/analogs.ts vocab takes
+    // effect on the next sync rather than needing a backfill each time.
+    const analogId = detectAnalog(
+      [p.text, p.link_title, p.link_description].filter(Boolean).join(" \n "),
+    );
     const rows = await sql<{ inserted: boolean }>`
       INSERT INTO posts (
         id, url, created_at, text, urls, domains, mentions, hashtags,
         media_type, media_urls, preview_image_url,
         is_reply, is_self_reply, is_quote,
         link_title, link_description, link_image_url, quoted_image_url,
-        chains, entities, products, shape,
+        chains, entities, products, shape, analog_id,
         enriched_at, updated_at
       ) VALUES (
         ${p.id}, ${p.url}, ${p.created_at}, ${p.text},
@@ -64,7 +73,7 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         ${p.mediaType}, ${JSON.stringify(p.media_urls)}, ${p.preview_image_url},
         ${p.is_reply}, ${p.is_self_reply}, ${p.is_quote},
         ${p.link_title}, ${p.link_description}, ${p.link_image_url}, ${p.quoted_image_url},
-        ${dim.chains}, ${dim.entities}, ${dim.products}, ${dim.shape},
+        ${dim.chains}, ${dim.entities}, ${dim.products}, ${dim.shape}, ${analogId},
         ${hasArticle ? new Date().toISOString() : null}, now()
       )
       ON CONFLICT (id) DO UPDATE SET
@@ -83,6 +92,7 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         entities = EXCLUDED.entities,
         products = EXCLUDED.products,
         shape = EXCLUDED.shape,
+        analog_id = EXCLUDED.analog_id,
         link_title = COALESCE(EXCLUDED.link_title, posts.link_title),
         link_description = COALESCE(EXCLUDED.link_description, posts.link_description),
         link_image_url = COALESCE(EXCLUDED.link_image_url, posts.link_image_url),

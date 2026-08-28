@@ -11,7 +11,7 @@ export const maxDuration = 60;
 // the other write endpoints; tightens once @eco.com auth lands.
 export async function POST(req: NextRequest) {
   try {
-    const { template, chain, product, articleId, docPageId, videoId, shape, angle, basePostText, priorTexts } =
+    const { template, chain, product, articleId, docPageId, videoId, analogId, eduShape, shape, angle, basePostText, priorTexts } =
       await req.json();
     if (!isTemplate(template)) {
       return NextResponse.json({ ok: false, error: "a valid template is required" }, { status: 400 });
@@ -23,6 +23,8 @@ export async function POST(req: NextRequest) {
       articleId: Number.isFinite(articleId) ? Number(articleId) : null,
       docPageId: Number.isFinite(docPageId) ? Number(docPageId) : null,
       videoId: Number.isFinite(videoId) ? Number(videoId) : null,
+      analogId: typeof analogId === "string" && analogId ? analogId : null,
+      eduShape: typeof eduShape === "string" && eduShape ? eduShape : null,
       shape: typeof shape === "string" && shape ? shape : null,
       angle: typeof angle === "string" && angle ? angle.slice(0, 500) : null,
       basePostText: typeof basePostText === "string" && basePostText ? basePostText : null,

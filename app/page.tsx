@@ -4,6 +4,8 @@ import {
   type Readiness,
   type ArticleShelfRow,
   type BroadEdBreakdown,
+  type CurriculumShelf,
+  type CurriculumRow,
 } from "@/lib/stats";
 import { getReviewCount } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
@@ -20,12 +22,14 @@ import {
   type LaneGroup,
   type DocsMeta,
   type VideosMeta,
+  type CurriculumMeta,
 } from "@/app/components/RecActions";
 import type { DocShelfRow, HomepagePenalty } from "@/lib/docs";
 import type { VideoShelfRow } from "@/lib/videos";
 import { ICP_DEFS } from "@/lib/icp";
 import { SERIES_DEFS } from "@/lib/videos";
 import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
+import { TIER_LABEL as ANALOG_TIER_LABEL, TIER_HINT as ANALOG_TIER_HINT, type AnalogTier } from "@/lib/analogs";
 import { ExpandableCard, CollapsibleSection } from "@/app/components/Collapse";
 
 export const dynamic = "force-dynamic";
@@ -66,7 +70,17 @@ export default async function PrioritizePage({
 }) {
   const filter = parseFilter(await searchParams);
   const [
-    { recommendations, reAmplify, recentChains, thoughtLeadership, broadEducational, docPages, homepagePenalty, videos },
+    {
+      recommendations,
+      reAmplify,
+      recentChains,
+      thoughtLeadership,
+      broadEducational,
+      docPages,
+      homepagePenalty,
+      videos,
+      curriculum,
+    },
     reviewCount,
   ] = await Promise.all([getInsights(filter), getReviewCount()]);
 
@@ -123,6 +137,7 @@ export default async function PrioritizePage({
                 docPages={docPages}
                 homepagePenalty={homepagePenalty}
                 videos={videos}
+                curriculum={curriculum}
               />
             ))}
           </div>
@@ -179,6 +194,7 @@ function buildActions(
   docPages: DocShelfRow[],
   homepagePenalty: HomepagePenalty,
   videos: VideoShelfRow[],
+  curriculum: CurriculumShelf,
 ): {
   mode: DraftMode;
   targets: Target[];
@@ -187,6 +203,8 @@ function buildActions(
   docsMeta?: DocsMeta;
   videosMeta?: VideosMeta;
   broad?: BroadEdBreakdown;
+  curriculum?: LaneGroup[];
+  curriculumMeta?: CurriculumMeta;
 } {
   const mode = TEMPLATE_BY_ID[rec.template].draftMode;
 
@@ -226,7 +244,13 @@ function buildActions(
   }
 
   if (mode === "discovery") {
-    return { mode, targets: [], broad: rec.template === "broad_educational" ? broadEd : undefined };
+    if (rec.template !== "broad_educational") return { mode, targets: [] };
+    return {
+      mode,
+      targets: [],
+      broad: broadEd,
+      ...buildCurriculumLanes(curriculum),
+    };
   }
 
   if (mode === "chains" && rec.chains.length > 0) {
@@ -383,6 +407,86 @@ function docTarget(r: DocShelfRow): Target & { score: number } {
 }
 
 // ---------------------------------------------------------------------------
+// Analog curriculum — group the concept registry by Jay's four tiers.
+//
+// Tier and not ICP, unlike the docs shelf. The docs shelf groups by audience
+// because its question is "whose door haven't I knocked on" among pages that
+// all already exist. Here the question is different: the tiers ARE a difficulty
+// and proximity ladder (Tier 1 is the direct analog, Tier 4 is context), and
+// they came from Jay in that order. The ICPs ride along on every row instead.
+//
+// Every concept appears, taught or not. That is the entire point of a
+// registry-first shelf — a concept with no post attached is the most valuable
+// row on it, and would be invisible on any shelf derived from posts.
+// ---------------------------------------------------------------------------
+function buildCurriculumLanes(shelf: CurriculumShelf): {
+  curriculum: LaneGroup[];
+  curriculumMeta: CurriculumMeta;
+} {
+  const tiers: AnalogTier[] = [1, 2, 3, 4];
+  const curriculum: LaneGroup[] = tiers
+    .map((tier) => {
+      const rows = shelf.rows.filter((r) => r.tier === tier).sort((a, b) => b.score - a.score);
+      const never = rows.filter((r) => r.useCount === 0).length;
+      return {
+        key: `tier-${tier}`,
+        label: ANALOG_TIER_LABEL[tier],
+        sublabel: `${rows.length} concept${rows.length === 1 ? "" : "s"} · ${never} never taught`,
+        hint: ANALOG_TIER_HINT[tier],
+        targets: rows.map((r) => curriculumTarget(r)),
+      };
+    })
+    .filter((l) => l.targets.length > 0)
+    // Coldest, strongest tier first — same rule as the docs and video lanes.
+    .sort((a, b) => (b.targets[0]?.score ?? 0) - (a.targets[0]?.score ?? 0));
+
+  return { curriculum, curriculumMeta: shelf.meta };
+}
+
+function curriculumTarget(r: CurriculumRow): Target & { score: number } {
+  const badges: NonNullable<Target["badges"]> = [];
+  if (r.useCount === 0) {
+    badges.push({ label: "Never taught", tone: "good", title: "No @eco post has ever explained this mechanism." });
+  }
+  if (r.breakStrength === 3) {
+    badges.push({ label: "Sharp break", tone: "good", title: "The divergence from the analog is strong and differentiated." });
+  }
+  badges.push({
+    label: r.side === "commercial" ? "Commercial" : "Technical",
+    tone: "mute",
+    title: `Written for the ${r.side} door: ${r.icpLabels.join(", ")}.`,
+  });
+  if (r.guardrail) {
+    badges.push({ label: "Guardrail", tone: "warn", title: r.guardrail });
+  }
+  return {
+    key: `analog-${r.analogId}`,
+    label: r.label,
+    sublabel: [
+      `score ${r.score}`,
+      r.icpLabels.join(", "),
+      r.useCount === 0 ? "never taught" : `taught ${r.useCount}×`,
+      r.mentionCount > 0 ? `${r.mentionCount} passing mention${r.mentionCount === 1 ? "" : "s"}` : null,
+      r.medianImpr != null ? `${compact(r.medianImpr)} median impr` : null,
+      r.daysSinceLastUse != null ? `last ${daysAgo(r.daysSinceLastUse)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    analogId: r.analogId,
+    badges,
+    useCount: r.useCount,
+    // The break, surfaced on the row. The drafter gets the full parallel AND
+    // break server-side; this is the half the operator needs to read to decide
+    // whether the concept is worth a post today.
+    note: r.breaksWhere,
+    basePostText: null,
+    angle: null,
+    priorTexts: r.posts.slice(0, 6).map((p) => p.text),
+    score: r.score,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Short-Form Video — group the clip library by series.
 //
 // Series and not ICP here: the operator's first question about a 300-clip
@@ -465,6 +569,7 @@ function shelfSummary(
   targets: Target[],
   products: ProductGroup[] | undefined,
   lanes: LaneGroup[] | undefined,
+  curriculumMeta?: CurriculumMeta,
 ): { count: string | undefined; nested: boolean } {
   const prods = products ?? [];
   const groups = lanes ?? [];
@@ -480,6 +585,15 @@ function shelfSummary(
     return { count: `${prods.length} products \u00b7 ${total} to draft from`, nested: true };
   }
   if (mode === "discovery") {
+    // Broad Educational's collapsed row should lead with the coverage gap, not
+    // with "run discovery" — the untaught count is the number that should make
+    // someone open the card.
+    if (curriculumMeta) {
+      return {
+        count: `${curriculumMeta.neverTaught}/${curriculumMeta.totalConcepts} concepts untaught \u00b7 + market news`,
+        nested: true,
+      };
+    }
     return { count: targets.length ? `${targets.length} sources` : "run discovery", nested: false };
   }
   const noun = mode === "chains" ? "angles" : mode === "articles" ? "articles" : "to draft from";
@@ -494,6 +608,7 @@ function RecCard({
   docPages,
   homepagePenalty,
   videos,
+  curriculum,
 }: {
   rec: Recommendation;
   rank: number;
@@ -502,17 +617,21 @@ function RecCard({
   docPages: DocShelfRow[];
   homepagePenalty: HomepagePenalty;
   videos: VideoShelfRow[];
+  curriculum: CurriculumShelf;
 }) {
   const top = rank === 1 && rec.score > 0;
   const lastType = mediaLabel(rec.lastMediaType);
-  const { mode, targets, products, lanes, docsMeta, videosMeta, broad } = buildActions(
-    rec,
-    tlArticles,
-    broadEd,
-    docPages,
-    homepagePenalty,
-    videos,
-  );
+  const {
+    mode,
+    targets,
+    products,
+    lanes,
+    docsMeta,
+    videosMeta,
+    broad,
+    curriculum: currLanes,
+    curriculumMeta,
+  } = buildActions(rec, tlArticles, broadEd, docPages, homepagePenalty, videos, curriculum);
 
   // Everything above the break line — the at-a-glance read, always visible.
   const header = (
@@ -563,13 +682,13 @@ function RecCard({
   // What is behind the click, said out loud on the collapsed row. A first-time
   // reader shouldn't have to open a pillar to learn whether it has anything in
   // it — or whether it nests another level of accordions inside.
-  const shelf = shelfSummary(mode, targets, products, lanes);
+  const shelf = shelfSummary(mode, targets, products, lanes, curriculumMeta);
 
   return (
     <ExpandableCard
       header={header}
       highlight={top}
-      actionLabel={ACTION_LABEL[mode]}
+      actionLabel={curriculumMeta ? "Teach a concept or discover sources · draft copy" : ACTION_LABEL[mode]}
       count={shelf.count}
       nested={shelf.nested}
       defaultOpen={rank === 1}
@@ -584,6 +703,8 @@ function RecCard({
         docsMeta={docsMeta}
         videosMeta={videosMeta}
         broad={broad}
+        curriculum={currLanes}
+        curriculumMeta={curriculumMeta}
         recDrivenCount={rec.recDrivenCount}
         recDrivenVsBaseline={rec.recDrivenVsBaseline}
       />

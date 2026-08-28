@@ -8,6 +8,7 @@ import { sql } from "./db.ts";
 import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
 import { ICP_BY_ID } from "./icp.ts";
+import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
 
 // In-tool "draft starting copy" — turns a prioritized recommendation into 2-3
 // on-brand X post options the operator can take to 90/10. NOT a finished-post
@@ -78,6 +79,12 @@ export interface GenerateCopyInput {
   articleId?: number | null;
   docPageId?: number | null;
   videoId?: number | null;
+  // A tradfi analog concept from lib/analogs.ts. When set, this is a CURRICULUM
+  // post: it teaches a mechanism rather than reporting a market signal.
+  analogId?: string | null;
+  // Which teaching shape to take (EDUCATION_SHAPES). Curriculum posts only —
+  // the seven product shapes don't apply to a concept explainer.
+  eduShape?: string | null;
   shape?: string | null;
   angle?: string | null; // optional free-text steer from the operator
   basePostText?: string | null;
@@ -209,7 +216,12 @@ function parseOptions(raw: string): CopyOption[] {
     .filter((o): o is CopyOption => !!o && typeof o === "object" && typeof (o as CopyOption).text === "string")
     .map((o) => ({
       angle: String(o.angle ?? "Option").slice(0, 60),
-      text: String(o.text).slice(0, 1000),
+      // 2400, not 1000. The cap is a sanity bound on a runaway generation, but
+      // the prompt actively asks for threads (3-8 posts) and curriculum drafts
+      // reliably use them — at 1000 chars a five-post thread came back with its
+      // closing question cut mid-word, which is exactly the part that earns the
+      // replies the X rules are written around.
+      text: String(o.text).slice(0, 2400),
       rationale: String(o.rationale ?? "").slice(0, 240),
     }))
     .slice(0, 3);
@@ -223,7 +235,10 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   const article = input.articleId ? await loadArticle(input.articleId) : null;
   const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;
   const video = input.videoId ? await getVideo(input.videoId) : null;
-  const icpId = docPage?.icp ?? video?.icp ?? null;
+  const analog = input.analogId ? ANALOG_BY_ID[input.analogId] : null;
+  const eduShape = input.eduShape ? EDU_SHAPE_BY_ID[input.eduShape] : null;
+  // An analog concept names its own ICPs; the first is the primary reader.
+  const icpId = docPage?.icp ?? video?.icp ?? analog?.icps[0] ?? null;
   const icp = icpId ? ICP_BY_ID[icpId] : null;
 
   const priors = (input.priorTexts ?? []).filter((t) => t && t.trim().length > 20).slice(0, 6);
@@ -327,6 +342,49 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
       ? `TARGET ICP for this post: ${icp.label} (${icp.side}).\n${icp.brief}\nWrite for THIS reader specifically, not for a general crypto audience.`
       : null,
 
+    // ------------------------------------------------------------------
+    // Curriculum post. The single most important thing here is the ORDER: the
+    // parallel earns the reader's attention, and the BREAK is the post. A draft
+    // that only runs the parallel is the "we're the Stripe of stablecoins" slop
+    // this registry exists to prevent — and it is also how a company
+    // accidentally adopts someone else's category, which is exactly what Ryne
+    // flagged about anchoring on payment orchestration.
+    // ------------------------------------------------------------------
+    analog
+      ? [
+          `THIS IS A CURRICULUM POST — it teaches a mechanism, it does not report news.`,
+          `TRADFI CONCEPT: ${analog.label}  (${ANALOG_TIER_LABEL[analog.tier]}, ${analog.side} door)`,
+          ``,
+          `THE PARALLEL — how the analog maps. Teach this accurately and in its own vocabulary:`,
+          `"""${analog.parallel}"""`,
+          ``,
+          `WHERE IT BREAKS — this is the payoff and the reason the post exists:`,
+          `"""${analog.breaksWhere}"""`,
+          ``,
+          `Structure: earn attention with the parallel, then land the break. A draft that only`,
+          `runs the parallel is not usable — the break IS the post.`,
+          `Eco is NOT named in the body. This is top-of-funnel: the reader should finish smarter`,
+          `about how money moves, and Eco's relevance should be inferable, not stated.`,
+          `HARD RULE — borrow the vocabulary, refuse the category. You may write an entire post`,
+          `about ${analog.label} without ever implying Eco belongs to that category. Eco is the`,
+          `routing and execution layer; never an orchestrator, PSP, gateway, prime broker or bridge.`,
+          analog.guardrail ? `CONCEPT GUARDRAIL: ${analog.guardrail}` : null,
+          analog.sources?.length
+            ? `Where we learned it (do not link these in the post; they are for your accuracy): ${analog.sources
+                .map((sr) => sr.title)
+                .join("; ")}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : null,
+
+    eduShape
+      ? `TEACHING SHAPE requested: ${eduShape.label} — ${eduShape.brief}`
+      : analog
+        ? `No shape requested — pick the one this concept best supports and name it in the rationale.`
+        : null,
+
     shape ? `SHAPE requested: ${shape.label} — ${shape.brief}` : null,
     input.angle ? `Operator's steer: ${input.angle}` : null,
 
@@ -353,9 +411,18 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           ? suffix
           : `${suffix}\n\nYour previous output was not valid JSON. Output ONLY the JSON array this time.`;
       try {
-        const { text } = await runClaudeCli(POSITIONING_BRIEF, context + nudge);
+        const { text, costUsd } = await runClaudeCli(POSITIONING_BRIEF, context + nudge);
         const options = parseOptions(text);
-        if (options.length) return options;
+        if (options.length) {
+          // Printed so the operator can SEE which backend served the draft.
+          // costUsd is what the turn would have cost on the API — on a
+          // subscription it is the saving, not a charge.
+          console.log(
+            `[generateCopy] backend=cli model=${MODEL} drafts=${options.length} ` +
+              `apiCreditsSpent=$0.00 wouldHaveCost=$${costUsd.toFixed(4)}`,
+          );
+          return options;
+        }
         lastErr = new Error("claude CLI returned no usable drafts.");
       } catch (e) {
         lastErr = e;
@@ -374,5 +441,14 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   });
 
   const textOut = msg.content.find((b) => b.type === "text");
-  return parseOptions(textOut && textOut.type === "text" ? textOut.text : "");
+  const options = parseOptions(textOut && textOut.type === "text" ? textOut.text : "");
+  // Same line for the API path, so the two are impossible to confuse. Priced
+  // from usage rather than guessed.
+  const u = msg.usage;
+  const spent = u ? (u.input_tokens * 3 + u.output_tokens * 15) / 1_000_000 : 0;
+  console.log(
+    `[generateCopy] backend=api model=${MODEL} drafts=${options.length} ` +
+      `apiCreditsSpent=$${spent.toFixed(4)} (in=${u?.input_tokens ?? "?"} out=${u?.output_tokens ?? "?"})`,
+  );
+  return options;
 }
