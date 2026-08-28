@@ -109,21 +109,18 @@ async function handle(req: NextRequest) {
     }
 
     // ------------------------------------------------------------------
-    // The analog-source sweep. Keeps the curriculum's evidence base fresh
-    // instead of frozen at whatever the first pass happened to find.
+    // The analog-source sweep, OFF by default here.
     //
-    // FOUR CONCEPTS, NOT TWENTY. Measured Firecrawl costs are 2 credits a
-    // search, 1 a map, 1 a scrape, so a concept costs ~9 and a twenty-concept
-    // fan-out would be ~180 credits a day against a 5,000/cycle plan. Four a
-    // day is ~36 and still refreshes every concept every five days. Override
-    // with ?sweep=N, or ?sweep=0 to skip it entirely.
-    //
-    // Last in the sync and deadline-bounded: if the ingest and classification
-    // steps ate the budget, the sweep stops cleanly and the concepts it did not
-    // reach sort first tomorrow, because the rotation is oldest-swept-first.
+    // It used to default to four concepts at the end of this handler, and the
+    // first production run showed why that cannot work: by the time ingest,
+    // rule and Claude classification, article attribution and the docs/video
+    // shelves are done, there is not enough of the 300s left, so the sweep
+    // reported "skipped: not enough time left in this run" and would have done
+    // that every night. It now has its own cron and its own clock at
+    // /api/sweep. ?sweep=N here is a manual escape hatch only.
     // ------------------------------------------------------------------
     const sweepParam = req.nextUrl.searchParams.get("sweep");
-    const sweepCount = sweepParam == null ? 4 : Math.max(0, Math.min(20, Number(sweepParam) || 0));
+    const sweepCount = sweepParam == null ? 0 : Math.max(0, Math.min(20, Number(sweepParam) || 0));
     let sweep: { concepts: number; added: number; credits: number; warnings: string[] } | null = null;
     if (sweepCount > 0) {
       try {
