@@ -177,9 +177,23 @@ const AUTHORITY = [
   /(^|\.)mas\.gov\.sg$/i,
 ];
 
+// Listing pages. The European Payments Council hub handed back three of these
+// in one production run and they ate three of that concept's four scrapes: the
+// extraction gate rejected all three with "index/listing page with no checkable
+// claims of its own", which is correct but costs a credit each to learn.
+// mapReportHub already drops /page/ and /tag/ style paths; these are the section
+// indexes that survive it.
+const INDEX_PATH =
+  /\/(news|press|press-?releases?|publ|publications?|insights?|articles?|blog|media|newsroom|resources?|library|events?|opinion|interviews?)\/?$/i;
+
 // Higher sorts first. fromHub outranks everything because we chose that hub for
-// this concept by hand.
+// this concept by hand, but an index page is worthless whatever it came from.
 function authorityRank(url: string, fromHub: boolean): number {
+  try {
+    if (INDEX_PATH.test(new URL(url).pathname)) return -1;
+  } catch {
+    /* unparseable url, let the normal ranking handle it */
+  }
   if (fromHub) return 3;
   const h = hostOf(url);
   if (AUTHORITY.some((re) => re.test(h))) return 2;
@@ -444,6 +458,10 @@ export async function sweepConcept(analogId: string, opts: SweepOptions = {}): P
   const candidates = [...hits.values()]
     .filter((h) => !seen.has(normUrl(h.url)))
     .filter((h) => !SKIP_HOST.test(hostOf(h.url)))
+    // Drop listing pages outright rather than ranking them last: they are never
+    // citable, so they should not be able to consume a scrape at all when the
+    // authoritative candidates run thin.
+    .filter((h) => authorityRank(h.url, !!h.fromHub) >= 0)
     // Spend the scrape budget on the most authoritative candidates, not on
     // whichever result the search engine happened to return first.
     .sort((a, b) => authorityRank(b.url, !!b.fromHub) - authorityRank(a.url, !!a.fromHub));
