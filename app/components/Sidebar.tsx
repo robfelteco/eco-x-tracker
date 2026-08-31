@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { TEMPLATE_DEFS } from "@/lib/taxonomy";
+import { SoundToggle } from "./useAction";
 
 // Left rail: Overview, one entry per template, All posts, Review queue. Preserves
 // the current filter (amplified/date) across navigation via the query string.
@@ -42,6 +43,8 @@ export function Sidebar({ reviewCount }: { reviewCount?: number }) {
       {item("/history", "History", pathname === "/history")}
       {item("/posts", "All posts", pathname === "/posts")}
       {item("/review", "Review queue", pathname === "/review", reviewCount)}
+      <div className="mt-3 mb-1 px-2.5 font-mono text-[10px] uppercase tracking-wider text-white/30">Preferences</div>
+      <SoundToggle />
     </nav>
   );
 }

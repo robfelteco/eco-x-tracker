@@ -688,3 +688,30 @@ CREATE TABLE IF NOT EXISTS analog_sweep_state (
   spend_credits  integer NOT NULL DEFAULT 0,    -- cumulative Firecrawl credits
   updated_at     timestamptz NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- Migration 010 — CHAIN INTEGRATION ARTICLES
+--
+-- The chain pillar was the one draft mode with no source material. Chain
+-- targets carried only a chain id, so lib/generateCopy.ts fell through to
+-- "positioning brief + pillar shape" and the model reconstructed plausible-
+-- sounding Eco copy from nothing. Every chain integration DOES have a written
+-- piece behind it; they just were never ingested, because scripts/ingest-
+-- articles.ts only reads the two Desktop blog folders and no chain piece was
+-- ever printed to PDF there.
+--
+-- Two new columns:
+--   chain      — which chain the piece announces, joining articles to the chain
+--                shelf (lib/stats.ts) so a chain target can carry an articleId.
+--   share_url  — the URL a draft must put in the body. NOT the same thing as
+--                canonical_url or x_article_url: pasting an @eco STATUS url
+--                into the composer makes X unfurl the article card, which is
+--                the whole point. `x.com/i/article/<id>` does not unfurl, and
+--                the blog url unfurls as a plain link preview. So:
+--                  chain has an X article -> the @eco status url that carried it
+--                  no X article (Solana, Polygon — both predate X articles)
+--                                          -> the eco.com/blog url
+-- ---------------------------------------------------------------------------
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS chain     text;
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS share_url text;
+CREATE INDEX IF NOT EXISTS articles_chain_idx ON articles (chain) WHERE chain IS NOT NULL;

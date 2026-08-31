@@ -9,8 +9,8 @@ import type { Template } from "./taxonomy.ts";
 // two things only:
 //
 //   1. The August 2026 algorithm facts and the x-algo-optimizer skill's format
-//      rules (links in body, one topic, 48-hour window, a thread costs one
-//      cadence slot, don't overpromise the hook).
+//      rules (links in body, one topic, 48-hour window, don't overpromise the
+//      hook). ONE POST always: see lib/antiSlop.ts formBlock().
 //   2. What this account's own corpus already shows. Where a number exists it is
 //      stated, because "deep links run about double the homepage" is a stronger
 //      instruction than "prefer deep links".
@@ -20,7 +20,7 @@ import type { Template } from "./taxonomy.ts";
 // and the failure mode this pillar actually falls into.
 
 export interface PillarShape {
-  /** "single" | "thread" | "either", plus a length steer. */
+  /** Always one post. This is the LENGTH steer only, never a thread. */
   form: string;
   /** The structural instruction, handed to the drafter verbatim. */
   build: string;
@@ -32,7 +32,7 @@ export interface PillarShape {
 
 export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   data_motion_visual: {
-    form: "Single post, 2-5 short lines. The animation carries the visual; the copy exists to frame one number.",
+    form: "Tight, 2-5 short lines. The animation carries the visual; the copy exists to frame one number.",
     build:
       "Lead with the number, not the setup. One statistic, stated plainly, then the one-line so-what that tells the reader why it is surprising. No preamble, no 'we dug into the data'. If the number needs three sentences of context to land, it is the wrong number.",
     citable:
@@ -42,7 +42,7 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   },
 
   integration_announcement: {
-    form: "Single post, short. A chain going live is news, and news does not need a thread.",
+    form: "Tight, under 280 characters. A chain going live is news, and news is short.",
     build:
       "Name the chain, then what it now makes possible for someone building. One concrete capability beats a list of three. The chain's own audience is the reach mechanism here, so make the post something that community would want to quote.",
     citable:
@@ -52,7 +52,7 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   },
 
   quote_card: {
-    form: "Single post, 1-3 lines above the card.",
+    form: "Tight, 1-3 lines above the card.",
     build:
       "The card carries the quote, so the copy must not repeat it. Introduce the person and why this particular claim is worth reading, or state the tension the quote resolves. Attribute by handle when they have one.",
     citable:
@@ -62,7 +62,7 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   },
 
   product_post: {
-    form: "Single post for a release; a short thread (3-5) when a mechanism needs explaining.",
+    form: "Mid, 400 to 900 characters. A release can run tight; a mechanism that needs explaining runs longer, in the SAME post.",
     build:
       "Problem first, mechanism second, product name last. Lead with the constraint a builder recognises, then how it is removed. Put the docs or blog link in the body. For a partner integration, the partner's shipped thing is the proof, so lead with what they built.",
     citable:
@@ -72,17 +72,17 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   },
 
   thought_leadership: {
-    form: "Either. A thread (4-7) when the argument needs steps; a tight single post when it is one claim.",
+    form: "Mid to long form. One claim runs tight; an argument with steps and a handled objection runs long, in one post.",
     build:
-      "Argue ONE claim pulled out of the piece, do not summarise it. Take a position a reasonable person could disagree with, then support it. Link the piece in the body. End on the part that is genuinely unresolved, which is what earns a considered reply rather than agreement.",
+      "Argue ONE claim pulled out of the piece, do not summarise it. Take a position a reasonable person could disagree with, then support it. Link the piece in the body. End on the part that is still unresolved, which is what earns a considered reply instead of agreement.",
     citable:
-      "A frame people adopt. If a reader can restate the argument in one sentence to a colleague, it travels; if it needs the whole thread, it does not.",
+      "A frame people adopt. If a reader can restate the argument in one sentence to a colleague, it travels; if it needs the whole post to make sense, it does not.",
     avoid:
       "Restating the article's abstract. Also avoid hedging every claim into uselessness, which is the failure mode of institutional voice.",
   },
 
   dev_doc_post: {
-    form: "Single post, tight. Code or a call signature is welcome.",
+    form: "Tight. Code or a call signature is welcome.",
     build:
       "Build the post around ONE specific mechanism, pain or parameter named on the page, and deep-link to that page in the body. Never the docs homepage: in this corpus deep-linked posts run roughly double the impressions of homepage posts, so the specificity is the strategy, not a nicety.",
     citable:
@@ -93,7 +93,7 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
 
   broad_educational: {
     form:
-      "Single post for market news. A thread (3-6) for a curriculum concept, since a mechanism needs steps.",
+      "Tight for market news. Long form for a curriculum concept, since a mechanism needs steps. Always ONE post either way.",
     build:
       "Eco is NOT named in the body: this is top-of-funnel and Eco's relevance should be inferable, never stated. For news, lead with the fact and give the so-what in one line. For a curriculum concept, earn attention with the parallel and land the break, then link the source in the body.",
     citable:
@@ -103,7 +103,7 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   },
 
   short_form_video_eco: {
-    form: "Single post, 1-2 lines. The copy sits above the video and only has to earn the play.",
+    form: "Tight, 1-2 lines. The copy sits above the video and only has to earn the play.",
     build:
       "The proven shape in this corpus is a question the clip answers, then who is answering it. Lead with the idea inside the clip, never a description of the clip from outside. Refer to the speaker by their exact handle.",
     citable:
@@ -113,7 +113,7 @@ export const PILLAR_SHAPES: Record<Template, PillarShape> = {
   },
 
   other: {
-    form: "Single post.",
+    form: "Tight.",
     build: "One clear idea, front-loaded hook, link in the body if there is one.",
     citable: "Give the reader one thing worth repeating.",
     avoid: "Trying to do two things in one post.",
@@ -128,8 +128,8 @@ export function pillarShapeBlock(template: Template, lane?: "curriculum" | "news
   const laneNote =
     template === "broad_educational" && lane
       ? lane === "curriculum"
-        ? "\nLANE: analog curriculum. A thread is usually right. Teach the mechanism, land the break, cite the source."
-        : "\nLANE: market news. Single post. Lead with the fact."
+        ? "\nLANE: analog curriculum. Long form in ONE post is usually right. Teach the mechanism, land the break, cite the source."
+        : "\nLANE: market news. Tight, one post. Lead with the fact."
       : "";
   return [
     `HOW THIS PILLAR'S POSTS ARE BUILT:`,

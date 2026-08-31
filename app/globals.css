@@ -48,3 +48,22 @@ select option {
 .scroll-thin::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Indeterminate sweep for short backend actions, where a determinate bar would
+   flash and read as a glitch. Used by ActionProgress in useAction.tsx. */
+@keyframes eco-indeterminate {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(410%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[eco-indeterminate_1\.1s_ease-in-out_infinite\] {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}

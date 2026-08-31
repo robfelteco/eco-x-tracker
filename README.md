@@ -37,6 +37,37 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ---
 
+## Copy generation
+
+Drafts come out of `lib/generateCopy.ts`. Two rules are enforced in code, not just
+asked for in the prompt:
+
+- **One post, never a thread.** Long form inside a single post is fine and often
+  better. `formBlock()` in `lib/antiSlop.ts` states it and `scanSlop()` catches it.
+- **No em dashes.** `sanitizePrompt()` strips them from the prompt on the way out
+  (the data files carried 41 of them, and prompt style is imitated), and
+  `autoFixSlop()` strips them from every draft on the way back.
+
+### If drafting is slow or times out
+
+Two settings do almost all the work, both in `lib/generateCopy.ts`:
+
+- **`--effort low`** on the CLI spawn. Without it the model treats drafting as a
+  reasoning task and burns tens of thousands of thinking tokens. Measured on one
+  curriculum prompt: default 503s / 27,878 thinking tokens, medium 372s / 21,263,
+  low 53s / 0, with no quality difference. Override with `COPY_CLI_EFFORT`.
+- **A neutral spawn cwd.** The CLI loads whatever project context it finds in the
+  working directory. From the repo root that is 110-146k cache-creation tokens
+  per call versus ~74k from a temp dir, on a request that needs none of it.
+
+If the CLI still stalls, it falls back to the API backend when `ANTHROPIC_API_KEY`
+is set (~15s, ~$0.04), so a bad draw costs a slower draft rather than an error.
+The CLI ceiling is 90s when that fallback exists and 240s when it does not.
+
+[ANTI-SLOP.md](./ANTI-SLOP.md) is the house standard: what is banned, why, and
+which source each rule came from. `lib/antiSlop.ts` is the machine-readable copy
+of it. Edit the two together.
+
 ## Operations
 
 ### One-off scripts

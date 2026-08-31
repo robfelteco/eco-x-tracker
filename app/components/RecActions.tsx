@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useAction, ActionProgress } from "./useAction";
 import { NestedDisclosure } from "@/app/components/Collapse";
 import { useRouter } from "next/navigation";
 import { QuoteDiscovery } from "./QuoteDiscovery";
@@ -147,6 +148,9 @@ interface CopyOption {
   sourceUrl?: string;
   score?: number;
   scoreNote?: string;
+  // What lib/antiSlop.ts still flags after the deterministic fixes and the
+  // repair pass. Usually empty. Shown so a weak draft names its own problem.
+  slop?: { rule: string; severity: "hard" | "soft"; match: string; fix: string }[];
 }
 
 function compact(n: number | null | undefined): string {
@@ -224,6 +228,14 @@ export function RecActions({
   const [srcErrByKey, setSrcErrByKey] = useState<Record<string, string>>({});
   const [srcNoteByKey, setSrcNoteByKey] = useState<Record<string, string>>({});
 
+  // Progress + completion chime. The per-row *Key state above still says WHICH
+  // row is busy; these say how far along it is and how long is left.
+  const draftAct = useAction("generate");
+  const sourcesAct = useAction("analog-sources");
+  const mineAct = useAction("questions");
+  const discoverAct = useAction("discover");
+  const useAct = useAction("use");
+
   const [marking, setMarking] = useState(false);
   const [markedKey, setMarkedKey] = useState<string | null>(null);
 
@@ -237,6 +249,7 @@ export function RecActions({
     setLoadingKey(t.key);
     setErrByKey((e) => ({ ...e, [t.key]: "" }));
     try {
+      const data = await draftAct.run(async () => {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -258,7 +271,8 @@ export function RecActions({
           priorTexts: t.priorTexts ?? [],
         }),
       });
-      const data = await res.json();
+        return res.json();
+      });
       if (data.ok) setOptionsByKey((o) => ({ ...o, [t.key]: data.options ?? [] }));
       else setErrByKey((e) => ({ ...e, [t.key]: data.error || "Failed" }));
     } catch (e) {
@@ -281,7 +295,7 @@ export function RecActions({
   async function markUsed(t: Target, opt: CopyOption) {
     setMarking(true);
     try {
-      const res = await fetch("/api/use", {
+      const res = await useAct.run(async () => fetch("/api/use", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -290,7 +304,7 @@ export function RecActions({
           angle: [t.label, shapeByKey[t.key], opt.angle].filter(Boolean).join(" · ").slice(0, 500),
           scoreAtUse: score,
         }),
-      });
+      }));
       const data = await res.json();
       if (data.ok) {
         setMarkedKey(t.key);
@@ -307,12 +321,14 @@ export function RecActions({
     setSrcErrByKey((e) => ({ ...e, [t.key]: "" }));
     setSrcNoteByKey((n) => ({ ...n, [t.key]: "" }));
     try {
-      const res = await fetch("/api/analog-sources", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ analogId: t.analogId }),
+      const data = await sourcesAct.run(async () => {
+        const res = await fetch("/api/analog-sources", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ analogId: t.analogId }),
+        });
+        return res.json();
       });
-      const data = await res.json();
       if (data.ok) {
         setSourcesByKey((m) => ({ ...m, [t.key]: data.sources ?? [] }));
         setSrcNoteByKey((n) => ({
@@ -341,12 +357,14 @@ export function RecActions({
     setMiningKey(t.key);
     setMineErrByKey((e) => ({ ...e, [t.key]: "" }));
     try {
-      const res = await fetch("/api/questions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ analogId: t.analogId }),
+      const data = await mineAct.run(async () => {
+        const res = await fetch("/api/questions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ analogId: t.analogId }),
+        });
+        return res.json();
       });
-      const data = await res.json();
       if (data.ok) setQuestionsByKey((q) => ({ ...q, [t.key]: data.questions ?? [] }));
       else setMineErrByKey((e) => ({ ...e, [t.key]: data.error || "Question mining failed" }));
     } catch (e) {
@@ -361,8 +379,10 @@ export function RecActions({
     setDiscoverErr(null);
     setDiscoverWarn([]);
     try {
-      const res = await fetch("/api/discover", { method: "POST" });
-      const data = await res.json();
+      const data = await discoverAct.run(async () => {
+        const res = await fetch("/api/discover", { method: "POST" });
+        return res.json();
+      });
       if (data.ok) {
         setDiscovered(
           (data.items ?? []).map((it: Record<string, unknown>, i: number) => ({
@@ -412,6 +432,18 @@ export function RecActions({
                     <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-eco-lightblue/80">
                       <span className={`inline-block h-2.5 w-2.5 flex-none rounded-full border ${isSel ? "border-eco-lightblue bg-eco-lightblue" : "border-white/30"}`} />
                       <span className="truncate">{o.angle}</span>
+                      <span
+                        title={
+                          o.text.length < 280
+                            ? "Tight band, under 280 characters."
+                            : o.text.length < 900
+                              ? "Mid band, 400 to 900 characters."
+                              : "Long form, 900 to 2000 characters. Earns dwell when the material has steps."
+                        }
+                        className="flex-none cursor-help rounded-full bg-white/[0.06] px-1.5 py-0.5 tabular-nums text-white/45"
+                      >
+                        {o.text.length < 280 ? "tight" : o.text.length < 900 ? "mid" : "long"} {o.text.length}
+                      </span>
                       {o.score != null && (
                         <span
                           title={
@@ -440,6 +472,28 @@ export function RecActions({
                   </div>
                   <p className="whitespace-pre-wrap text-sm text-white/85">{o.text}</p>
                   {o.rationale && <p className="mt-1 text-[11px] italic text-white/40">{o.rationale}</p>}
+
+                  {/* Anti-slop findings. Em dashes, thread markers and markdown
+                      are already fixed in code before this renders, so anything
+                      here needed a judgment call the linter would not make. */}
+                  {!!o.slop?.length && (
+                    <div className="mt-2 space-y-1 border-t border-white/[0.06] pt-1.5">
+                      {o.slop.map((f, j) => (
+                        <div key={j} className="flex items-baseline gap-1.5 text-[10.5px] leading-snug">
+                          <span
+                            className={`flex-none rounded px-1 py-px font-mono text-[9px] uppercase tracking-wider ${
+                              f.severity === "hard" ? "bg-red-400/15 text-red-300" : "bg-amber-400/12 text-amber-300/80"
+                            }`}
+                          >
+                            {f.rule}
+                          </span>
+                          <span className="min-w-0 text-white/45">
+                            <span className="text-white/70">&ldquo;{f.match}&rdquo;</span> {f.fix}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {/* The citation. One line, not a second thing to publish:
                       the link is already in the post body above, so this is a
@@ -575,6 +629,13 @@ export function RecActions({
           </button>
         </div>
 
+        {/* One bar per row, under the button strip. Keyed off the per-row
+            *Key state so a draft running on another row does not animate
+            this one. */}
+        {loadingKey === t.key && <ActionProgress state={draftAct.state} />}
+        {findingKey === t.key && <ActionProgress state={sourcesAct.state} />}
+        {miningKey === t.key && <ActionProgress state={mineAct.state} />}
+
         {/* The evidence base, listed before the teaching content. A curriculum
             draft argues FROM one of these, so seeing them — or seeing that
             there are none — is what tells the operator whether drafting is
@@ -590,7 +651,7 @@ export function RecActions({
                   Source material
                 </span>
                 {note && <span className="font-mono text-[10px] text-emerald-300/70">{note}</span>}
-                {findingKey === t.key && <span className="text-[11px] text-white/40">searching + verifying…</span>}
+
               </div>
               {err && <p className="font-mono text-[11px] text-red-400">{err}</p>}
               {srcs.length === 0 ? (
@@ -667,7 +728,7 @@ export function RecActions({
           <div className="space-y-1.5 border-t border-white/[0.06] px-3 py-2">
             <div className="font-mono text-[10px] uppercase tracking-wider text-white/30">
               Questions people ask
-              {miningKey === t.key && <span className="ml-2 normal-case tracking-normal text-white/40">searching…</span>}
+
             </div>
             {mineErrByKey[t.key] && <p className="font-mono text-[11px] text-red-400">{mineErrByKey[t.key]}</p>}
             {questionsByKey[t.key]?.length === 0 && (
@@ -713,6 +774,7 @@ export function RecActions({
                   >
                     {loadingKey === `${t.key}-q${i}` ? "Drafting…" : "Answer it"}
                   </button>
+                  {loadingKey === `${t.key}-q${i}` && <ActionProgress state={draftAct.state} />}
                 </div>
                 {q.angle && <p className="mt-1 text-[11px] italic text-white/40">{q.angle}</p>}
                 {/* The draft for THIS question renders under it, not under the concept. */}
@@ -842,7 +904,7 @@ export function RecActions({
           >
             {discovering ? "Discovering…" : discovered.length ? "Discover more" : "Discover fresh sources"}
           </button>
-          {discovering && <span className="ml-2 text-xs text-white/40">Searching the web + X for recent, unused angles…</span>}
+          {discovering && <ActionProgress state={discoverAct.state} className="max-w-md" />}
           {discoverErr && <span className="ml-2 font-mono text-[11px] text-red-400">{discoverErr}</span>}
           {discoverWarn.map((w, i) => (
             <div key={i} className="mt-1 font-mono text-[10px] text-amber-300/70">{w}</div>

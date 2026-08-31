@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useAction, ActionProgress } from "./useAction";
 
 // The "Add to roster?" tray (spec §5.5).
 //
@@ -22,14 +23,17 @@ export interface Suggestion {
 export function RosterTray({ initial }: { initial: Suggestion[] }) {
   const [items, setItems] = useState(initial);
   const [editing, setEditing] = useState<number | null>(null);
+  const saveAct = useAction("roster");
 
   async function act(id: number, body: Record<string, unknown>) {
-    const res = await fetch("/api/quotes/roster", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, ...body }),
+    const data = await saveAct.run(async () => {
+      const res = await fetch("/api/quotes/roster", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, ...body }),
+      });
+      return res.json();
     });
-    const data = await res.json();
     if (data.ok) setItems((cur) => cur.filter((s) => s.id !== id));
   }
 
@@ -91,6 +95,7 @@ export function RosterTray({ initial }: { initial: Suggestion[] }) {
               </button>
             </div>
           )}
+          <ActionProgress state={saveAct.state} className="max-w-[220px]" />
         </div>
       ))}
     </div>

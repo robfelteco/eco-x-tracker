@@ -269,6 +269,12 @@ function buildActions(
           : c.daysSince == null
             ? "never used"
             : `last ${daysAgo(c.daysSince)}`;
+      // Whether this chain has an integration article decides whether it can
+      // be drafted at all. Six do; the rest of CHAIN_LABELS have nothing
+      // written behind them, and a draft with no source is the failure mode
+      // this shelf just got fixed for — so say it on the row instead of
+      // handing the drafter a chain name and hoping.
+      const sourced = c.articleId != null;
       return {
         key: `chain-${c.chain}`,
         label: c.label,
@@ -276,8 +282,27 @@ function buildActions(
           c.daysSince == null ? "never" : daysAgo(c.daysSince)
         } · ${cover}`,
         chain: c.chain,
+        articleId: c.articleId,
+        // The link the draft has to carry. For BNB/Hyperliquid/TRON/Robinhood
+        // this is the @eco status url, so pasting the draft into the composer
+        // unfurls the X article card; Solana and Polygon predate X articles and
+        // fall back to the blog url.
+        href: c.shareUrl,
         basePostText: base,
         angle: `${c.label} angle`,
+        priorTexts: c.priorTexts,
+        useCount: c.priorTexts.length,
+        badges: sourced
+          ? [{
+              label: c.shareUrl?.includes("/status/") ? "X article" : "Blog link",
+              tone: "good" as const,
+              title: `Drafts argue from "${c.articleTitle}" and link ${c.shareUrl}`,
+            }]
+          : [{
+              label: "No article",
+              tone: "warn" as const,
+              title: "No integration piece has been written for this chain — drafting is blocked.",
+            }],
       };
     });
     return { mode, targets };

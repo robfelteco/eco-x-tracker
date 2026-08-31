@@ -234,6 +234,18 @@ export interface ChainAngle {
   coverTemplate: Template | null; // pillar whose post touched it most recently
   coverLabel: string | null; // that pillar's display label
   coveredElsewhere: boolean; // the most recent touch came from a DIFFERENT pillar
+  // --- The integration article behind this chain, when one exists ------------
+  // Chain targets used to carry a chain id and nothing else, so the drafter had
+  // no source material and invented its own facts (and its own link). These
+  // three carry the piece through to lib/generateCopy.ts.
+  articleId: number | null;
+  articleTitle: string | null;
+  /** The URL a draft must link to. An @eco status url unfurls the X article
+   *  card in the composer; the blog url is the fallback for chains announced
+   *  before Eco published X articles. */
+  shareUrl: string | null;
+  /** Posts that already used this article — handed over as "angles spent". */
+  priorTexts: string[];
 }
 
 // A concrete, already-published post the operator can put back out for this
@@ -477,6 +489,34 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   `;
   const coverageByChain = new Map(coverageRows.map((r) => [r.chain, r]));
 
+  // The integration article per chain, plus every post that already ran it.
+  // Without this the chain pillar was the one draft mode with no source: it got
+  // a chain name and the positioning brief, and the model filled the gap by
+  // reconstructing plausible-sounding Eco copy. Six chains have a piece; the
+  // other twenty in CHAIN_LABELS have none, and the UI has to say so rather
+  // than silently offering an unsourced draft.
+  const chainArticleRows = await sql<{
+    chain: string;
+    articleId: number;
+    title: string;
+    shareUrl: string | null;
+    priorTexts: string[];
+  }>`
+    SELECT a.chain,
+           a.id                        AS "articleId",
+           a.title,
+           a.share_url                 AS "shareUrl",
+           COALESCE(
+             (SELECT array_agg(p.text ORDER BY p.created_at DESC)
+              FROM posts p
+              WHERE p.article_id = a.id AND p.is_reply = false AND p.text IS NOT NULL),
+             '{}'
+           )                           AS "priorTexts"
+    FROM articles a
+    WHERE a.chain IS NOT NULL
+  `;
+  const articleByChain = new Map(chainArticleRows.map((r) => [r.chain, r]));
+
   const anglesByTemplate = new Map<Template, ChainAngle[]>();
   for (const a of angleRows) {
     const def = TEMPLATE_BY_ID[a.template];
@@ -485,6 +525,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     // as recent or more recent. Falling back to the pillar clock keeps the row
     // sane if a chain somehow has no coverage row.
     const cov = coverageByChain.get(a.chain);
+    const art = articleByChain.get(a.chain);
     const coverDaysSince = cov?.daysSince ?? a.daysSince;
     list.push({
       chain: a.chain,
@@ -500,6 +541,10 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
       coverTemplate: cov?.lastTemplate ?? null,
       coverLabel: cov ? TEMPLATE_BY_ID[cov.lastTemplate].label : null,
       coveredElsewhere: cov != null && cov.lastTemplate !== a.template,
+      articleId: art?.articleId ?? null,
+      articleTitle: art?.title ?? null,
+      shareUrl: art?.shareUrl ?? null,
+      priorTexts: (art?.priorTexts ?? []).slice(0, 6),
     });
     anglesByTemplate.set(a.template, list);
   }

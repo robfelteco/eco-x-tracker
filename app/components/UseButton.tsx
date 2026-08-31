@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { useAction, ActionProgress } from "./useAction";
 
 export interface ChainOption {
   chain: string;
@@ -32,22 +33,25 @@ export function UseButton({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const router = useRouter();
+  const act = useAction("use");
 
   async function mark() {
     setBusy(true);
     setErr(null);
     try {
-      const res = await fetch("/api/use", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          template,
-          chain: chain || null,
-          scoreAtUse: score,
-          suggestedPostId,
-        }),
+      const data = await act.run(async () => {
+        const res = await fetch("/api/use", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            template,
+            chain: chain || null,
+            scoreAtUse: score,
+            suggestedPostId,
+          }),
+        });
+        return res.json();
       });
-      const data = await res.json();
       if (data.ok) {
         setDone(data.id);
         start(() => router.refresh());
@@ -114,6 +118,7 @@ export function UseButton({
       >
         {busy ? "Marking…" : "Mark as used"}
       </button>
+      {act.pending && <ActionProgress state={act.state} className="w-16" />}
       {err && <span className="font-mono text-[10px] text-red-400">{err}</span>}
     </div>
   );

@@ -7,6 +7,7 @@ import {
   LANES, LANE_STEPS, DEFAULT_LANE_MS, laneIsDone, laneFraction, runFraction,
   remainingMs, formatDuration, stepLabel, runIsLive, type Lane, type RunProgress,
 } from "@/lib/quoteProgress";
+import { playChime, unlock } from "./notifySound";
 
 // The Quote Card pillar's expanded section.
 //
@@ -155,6 +156,7 @@ export function QuoteDiscovery() {
   async function start() {
     if (driving.current) return;
     driving.current = true;
+    unlock();
     setStarting(true);
     setErr(null);
     try {
@@ -191,6 +193,9 @@ export function QuoteDiscovery() {
         }
         await refresh(runId);
       }
+      // Every lane has landed. This is the longest action in the app by a wide
+      // margin, so it is the one most likely to be started and walked away from.
+      playChime();
     } finally {
       setStarting(false);
       driving.current = false;

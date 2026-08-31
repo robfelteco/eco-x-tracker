@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { spawn } from "child_process";
+import { tmpdir } from "os";
 import { POSITIONING_BRIEF } from "./positioning.ts";
 import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
 import { chainLabel } from "./dimensions.ts";
@@ -11,6 +12,16 @@ import { ICP_BY_ID } from "./icp.ts";
 import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
 import { sourcesForDrafting } from "./analogSources.ts";
 import { pillarShapeBlock } from "./pillarShapes.ts";
+import {
+  ANTI_SLOP_BRIEF,
+  formBlock,
+  autoFixSlop,
+  sanitizePrompt,
+  scanSlop,
+  hardFindings,
+  findingsForRepair,
+  type SlopFinding,
+} from "./antiSlop.ts";
 
 // In-tool "draft starting copy" — turns a prioritized recommendation into 2-3
 // on-brand X post options the operator can take to 90/10. NOT a finished-post
@@ -54,10 +65,28 @@ function chosenBackend(): CopyBackend {
   return process.env.VERCEL ? "api" : "cli";
 }
 
-// 300s, not 180s: the CLI retries internally before giving up, so an auth
-// failure takes ~190s to surface its real message. A tighter ceiling SIGKILLs
-// it first and reports an opaque timeout instead of "Failed to authenticate".
-const CLI_TIMEOUT_MS = Number(process.env.COPY_CLI_TIMEOUT_MS || 300_000);
+// How long to let the CLI run before giving up on it.
+//
+// A healthy curriculum draft lands in about 55s once "--effort low" and the
+// neutral spawn cwd are in play. It is still not reliable: repeated runs of the
+// same prompt have come back at 52s, 154s and >240s, so the ceiling is a real
+// part of the design rather than a formality.
+//
+// The value depends on whether there is anywhere to fall back TO:
+//
+//   API key set  ->  90s. Fail fast and let the API finish the job. The API
+//                    path costs about $0.04 and lands in ~15s, so waiting four
+//                    minutes for a doomed CLI turn buys nothing. The cost is
+//                    that a genuine auth failure (which the CLI takes ~190s of
+//                    internal retries to report) now surfaces as a timeout,
+//                    with the real message preserved in the fallback log line.
+//   no API key   ->  240s, because a slow answer beats no answer and there is
+//                    nothing to hand off to.
+function cliTimeoutMs(): number {
+  const override = Number(process.env.COPY_CLI_TIMEOUT_MS);
+  if (Number.isFinite(override) && override > 0) return override;
+  return process.env.ANTHROPIC_API_KEY ? 90_000 : 240_000;
+}
 
 let _client: Anthropic | null = null;
 function client(): Anthropic {
@@ -83,6 +112,12 @@ export interface CopyOption {
   // three options against each other, not as an absolute number.
   score?: number;
   scoreNote?: string;
+  /** The length band the drafter committed to before writing. */
+  band?: "tight" | "mid" | "long";
+  // What the linter still flags after the deterministic fixes and the repair
+  // pass. Usually empty. Surfaced in the UI so the operator sees WHY a draft is
+  // weak instead of only that it scored low.
+  slop?: SlopFinding[];
 }
 
 export interface GenerateCopyInput {
@@ -114,11 +149,19 @@ interface ArticleContext {
   author: string | null;
   publishedOn: string | null;
   body: string | null;
+  /** Set on chain-integration rows: the chain this piece announces. */
+  chain: string | null;
+  /** The URL a draft must link to. See db/schema.sql migration 010 — for a
+   *  chain with an X article this is the @eco STATUS url, because that is what
+   *  makes the X composer unfurl the article card. `x.com/i/article/<id>` does
+   *  not unfurl, so it is never the link we hand a draft. */
+  shareUrl: string | null;
 }
 
 async function loadArticle(id: number): Promise<ArticleContext | null> {
   const rows = await sql<ArticleContext>`
-    SELECT title, dek, author, to_char(published_on, 'YYYY-MM-DD') AS "publishedOn", body
+    SELECT title, dek, author, to_char(published_on, 'YYYY-MM-DD') AS "publishedOn", body,
+           chain, share_url AS "shareUrl"
     FROM articles WHERE id = ${id}`;
   return rows[0] ?? null;
 }
@@ -136,6 +179,18 @@ function runClaudeCli(system: string, user: string): Promise<{ text: string; cos
     "-p",
     "--output-format", "json",
     "--tools", "",
+    // THE reason this backend used to time out. Measured 2026-08-28 on one
+    // curriculum prompt, same bytes each time:
+    //
+    //   default  503s   27,878 thinking tokens   (blew the 300s ceiling)
+    //   medium   372s   21,263 thinking tokens   (also blew it)
+    //   low       53s        0 thinking tokens   (same 3 drafts, same quality)
+    //
+    // Drafting is not a reasoning task, and the parts that DO need checking are
+    // checked in code by lib/antiSlop.ts after the fact. Asking the model to
+    // deliberate over a 60-rule standard bought eight minutes of thinking and
+    // nothing else. Override with COPY_CLI_EFFORT if a prompt ever needs it.
+    "--effort", process.env.COPY_CLI_EFFORT || "low",
     "--system-prompt", system,
     "--model", MODEL,
   ];
@@ -159,7 +214,13 @@ function runClaudeCli(system: string, user: string): Promise<{ text: string; cos
 
     let child;
     try {
-      child = spawn(bin, args, { env });
+      // Spawn from a neutral directory, NOT the repo. The CLI loads whatever
+      // project context it finds in cwd, and from the repo root that means this
+      // project's AGENTS.md (the Next.js rules block) plus its skills: measured
+      // at 110-146k cache-creation tokens per call versus ~74k from a temp dir,
+      // on a request that needs none of it. The prompt carries everything the
+      // drafter needs; the repo context is pure latency and cost.
+      child = spawn(bin, args, { env, cwd: tmpdir() });
     } catch (e) {
       reject(e);
       return;
@@ -167,10 +228,11 @@ function runClaudeCli(system: string, user: string): Promise<{ text: string; cos
 
     let out = "";
     let err = "";
+    const ceiling = cliTimeoutMs();
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`claude CLI timed out after ${Math.round(CLI_TIMEOUT_MS / 1000)}s.`));
-    }, CLI_TIMEOUT_MS);
+      reject(new Error(`claude CLI timed out after ${Math.round(ceiling / 1000)}s.`));
+    }, ceiling);
 
     child.on("error", (e: NodeJS.ErrnoException) => {
       clearTimeout(timer);
@@ -229,11 +291,13 @@ function parseOptions(raw: string): CopyOption[] {
     .filter((o): o is CopyOption => !!o && typeof o === "object" && typeof (o as CopyOption).text === "string")
     .map((o) => ({
       angle: String(o.angle ?? "Option").slice(0, 60),
-      // 2400, not 1000. The cap is a sanity bound on a runaway generation, but
-      // the prompt actively asks for threads (3-8 posts) and curriculum drafts
-      // reliably use them — at 1000 chars a five-post thread came back with its
-      // closing question cut mid-word, which is exactly the part that earns the
-      // replies the X rules are written around.
+      band: o.band === "tight" || o.band === "mid" || o.band === "long" ? o.band : undefined,
+      // 2400, not 1000. Threads are banned now, but long form in ONE post is
+      // explicitly wanted: the top length band runs to 2000 characters and a
+      // curriculum post that teaches a mechanism uses it. The cap is a sanity
+      // bound on a runaway generation, nothing more. At 1000 a long-form draft
+      // came back with its closing question cut mid-word, which is the part
+      // that earns the replies the X rules are written around.
       text: String(o.text).slice(0, 2400),
       rationale: String(o.rationale ?? "").slice(0, 240),
       sourceTitle: o.sourceTitle ? String(o.sourceTitle).slice(0, 200) : undefined,
@@ -244,6 +308,30 @@ function parseOptions(raw: string): CopyOption[] {
     .slice(0, 3);
 }
 
+
+// Belt and braces on the LINK for an article-backed post. The prompt names the
+// exact URL, and the model mostly obliges — but the failure we actually shipped
+// was a draft closing on an invented `https://eco.com/routes`, which reads as a
+// real Eco link and unfurls as nothing. For a chain announcement the link is
+// not a footnote, it is the post's visual: the @eco status url is what makes X
+// render the article card. So the URL is corrected in code rather than trusted.
+function enforceLink(options: CopyOption[], url: string, title: string): CopyOption[] {
+  const want = url.replace(/\/+$/, "");
+  return options.map((o) => {
+    const found = o.text.match(/https?:\/\/\S+/g) ?? [];
+    let text = o.text;
+    if (found.length === 0) {
+      text = `${text.trim()}\n\n${url}`;
+    } else if (!found.every((u) => u.replace(/[).,]+$/, "").replace(/\/+$/, "") === want)) {
+      // Collapse every URL to the right one, then de-duplicate if the model had
+      // written the link twice.
+      text = text.replace(/https?:\/\/\S+/g, url);
+      const parts = text.split(url);
+      if (parts.length > 2) text = parts[0] + url + parts.slice(1).join("").replace(/^\s*\n/, "");
+    }
+    return { ...o, text: text.replace(/[ \t]+\n/g, "\n").trim(), sourceTitle: title, sourceUrl: url };
+  });
+}
 
 // Belt and braces on the citation. The prompt says "copy the URL exactly", and
 // models mostly do — but "mostly" is not good enough for a link we publish, and
@@ -322,6 +410,20 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     );
   }
 
+  // Same rule as the curriculum shelf, for the same reason. A chain
+  // announcement with no article behind it is exactly how this pillar ended up
+  // producing confident copy about venue types and execution guarantees that
+  // appear in no piece we ever published. Twenty of the twenty-six chains in
+  // CHAIN_LABELS have nothing written behind them; those are not draftable
+  // until someone writes the piece.
+  if (input.template === "integration_announcement" && !article) {
+    throw new Error(
+      `No integration article for ${chain ?? "this chain"} yet. A chain announcement has to argue from the ` +
+        `published piece and link to it — write the blog post first, add the chain to ` +
+        `scripts/ingest-chain-articles.ts, and re-run it.`,
+    );
+  }
+
   const priors = (input.priorTexts ?? []).filter((t) => t && t.trim().length > 20).slice(0, 6);
 
   const context = [
@@ -332,6 +434,11 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     // something different for a 12-second data animation than for a five-post
     // explainer of correspondent banking.
     pillarShapeBlock(input.template, analog ? "curriculum" : input.template === "broad_educational" ? "news" : undefined),
+
+    // Placed directly after the pillar shape and phrased as an override, because
+    // it contradicts what the pillars used to say. Threads are gone: Rob's rule
+    // is one post, always, with a healthy mix of lengths across the options.
+    formBlock(),
 
     product
       ? [
@@ -360,6 +467,16 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           article.publishedOn ? `  Published: ${article.publishedOn}` : null,
           article.body ? `  Body (excerpt):\n"""${article.body.slice(0, 5000)}"""` : null,
           `Argue FROM this piece. Pull a specific claim out of it — do not summarise the whole thing.`,
+          `Every fact in your draft must come from the body above. Do not add capabilities,`,
+          `venue types, guarantees or numbers the piece does not state — a reader who opens the`,
+          `link should find what you claimed.`,
+          // The link is the payload for chain announcements: pasting the @eco
+          // status url into the composer unfurls the article card, which is the
+          // post's whole visual. A draft that links anywhere else silently
+          // costs us that embed.
+          article.shareUrl
+            ? `LINK — put EXACTLY this URL in the post body, on its own line, and no other URL:\n  ${article.shareUrl}\nNever invent a link, and never substitute a marketing page such as an /routes or /docs URL.`
+            : null,
         ]
           .filter(Boolean)
           .join("\n")
@@ -516,11 +633,19 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
       : null,
 
     "",
+    ANTI_SLOP_BRIEF,
+    "",
     "Return 2-3 distinct starting-point drafts as STRICT JSON only, no prose, no code fences:",
     analog
-      ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
-      : `[{"angle": "<short label>", "text": "<the draft post>", "rationale": "<one line: which ICP + pillar, why this hook>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`,
+      ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
+      : `[{"angle": "<short label>", "text": "<the draft post>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP + pillar, why this hook>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`,
     "Each draft targets ONE ICP. Vary the angle across drafts.",
+    // Repeated here, at the very end, because it is the instruction the drafter
+    // drops first: left to itself every option comes back long form. Writing the
+    // band into the JSON forces the choice before the prose is written.
+    `THE THREE "band" VALUES MUST ALL DIFFER: one "tight" (under 280 chars), one "mid"`,
+    `(400-900 chars), one "long" (900-2000 chars). Write each draft to the band it`,
+    `declares. If the material cannot carry a band, say so in that draft's rationale.`,
     "",
     "SCORE each draft 0-100 before returning it, and let the score change the draft:",
     "  citability (would someone paste this URL into a work channel? this is the 20.0 signal)",
@@ -528,11 +653,34 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     "  dwell value (enough substance to hold attention)",
     "  hook honesty (does the payload deliver what the first line implies?)",
     "  standing out from a feed of stablecoin takes",
-    "  slop risk (does it read as machine-written? check the voice mechanics)",
+    "  slop risk (does it read as machine-written?)",
+    "  length fit (is this the right band for the material?)",
     "Anything you would score under 60, rewrite before returning it. Put the weakest dimension in scoreNote.",
   ]
     .filter(Boolean)
     .join("\n\n");
+
+  const options = reconcileSources(await runBackend(context), analogSources);
+  // An article-backed post carries the piece's own link, never a marketing page
+  // the model reached for. Curriculum posts keep their own reconcile pass.
+  const linked = article?.shareUrl ? enforceLink(options, article.shareUrl, article.title) : options;
+  return polish(linked, analogSources);
+}
+
+// ---------------------------------------------------------------------------
+// Backend dispatch, extracted so the slop-repair pass can reuse it.
+//
+// sanitizePrompt() runs on every prompt on the way out. The context block pulls
+// strings from taxonomy, products, analogs, icp and pillarShapes plus article
+// bodies, doc pages and video transcripts straight out of Postgres, and those
+// carried 100+ em dashes between them. Prompt style is imitated: a model shown
+// that many em dashes while being told not to write them will write them.
+// ---------------------------------------------------------------------------
+async function runBackend(userPrompt: string): Promise<CopyOption[]> {
+  const prompt = sanitizePrompt(userPrompt);
+  // Prompt size is the first thing to check when the CLI hits its ceiling, so
+  // it is logged rather than guessed at.
+  console.log(`[generateCopy] prompt=${prompt.length} chars system=${POSITIONING_BRIEF.length} chars`);
 
   if (chosenBackend() === "cli") {
     // No structured-output mode on the CLI, so a bad parse gets one retry with a
@@ -545,11 +693,11 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           ? suffix
           : `${suffix}\n\nYour previous output was not valid JSON. Output ONLY the JSON array this time.`;
       try {
-        const { text, costUsd } = await runClaudeCli(POSITIONING_BRIEF, context + nudge);
-        const options = reconcileSources(parseOptions(text), analogSources);
+        const { text, costUsd } = await runClaudeCli(POSITIONING_BRIEF, prompt + nudge);
+        const options = parseOptions(text);
         if (options.length) {
           // Printed so the operator can SEE which backend served the draft.
-          // costUsd is what the turn would have cost on the API — on a
+          // costUsd is what the turn would have cost on the API; on a
           // subscription it is the saving, not a charge.
           console.log(
             `[generateCopy] backend=cli model=${MODEL} drafts=${options.length} ` +
@@ -564,18 +712,38 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
         if (e instanceof Error && (e.message.includes("not found") || e.message.includes("timed out"))) break;
       }
     }
-    throw lastErr instanceof Error ? lastErr : new Error("CLI copy generation failed.");
+    // The CLI could not deliver. Rather than lose the request, fall back to the
+    // API when a key is configured: a draft that costs credits beats a red error
+    // after a four-minute wait. Rob hit exactly this on a Smart Order Routing
+    // draft, which is what surfaced the thinking-token blowup above.
+    const why = lastErr instanceof Error ? lastErr.message : "CLI copy generation failed.";
+    if (process.env.ANTHROPIC_API_KEY) {
+      console.log(`[generateCopy] cli failed (${why}); falling back to the API backend`);
+      try {
+        return await runApi(prompt);
+      } catch (apiErr) {
+        throw new Error(`${why} API fallback also failed: ${apiErr instanceof Error ? apiErr.message : apiErr}`);
+      }
+    }
+    throw new Error(`${why} Set ANTHROPIC_API_KEY to let the API backend cover for the CLI, or set COPY_BACKEND=api.`);
   }
 
+  return runApi(prompt);
+}
+
+async function runApi(prompt: string): Promise<CopyOption[]> {
   const msg = await client().messages.create({
     model: MODEL,
-    max_tokens: 2000,
+    // 4000, not 2000. Three long-form drafts (up to 2000 chars each) plus
+    // rationales, scores and citations overrun 2000 tokens, and a truncated
+    // JSON array parses to zero drafts rather than to a short one.
+    max_tokens: 4000,
     system: POSITIONING_BRIEF,
-    messages: [{ role: "user", content: context }],
+    messages: [{ role: "user", content: prompt }],
   });
 
   const textOut = msg.content.find((b) => b.type === "text");
-  const options = reconcileSources(parseOptions(textOut && textOut.type === "text" ? textOut.text : ""), analogSources);
+  const options = parseOptions(textOut && textOut.type === "text" ? textOut.text : "");
   // Same line for the API path, so the two are impossible to confuse. Priced
   // from usage rather than guessed.
   const u = msg.usage;
@@ -585,4 +753,107 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
       `apiCreditsSpent=$${spent.toFixed(4)} (in=${u?.input_tokens ?? "?"} out=${u?.output_tokens ?? "?"})`,
   );
   return options;
+}
+
+// ---------------------------------------------------------------------------
+// The enforcement half of the anti-slop standard.
+//
+// Rules in a prompt are followed most of the time, and "most of the time" is how
+// an em dash reaches a published post. So:
+//
+//   1. autoFixSlop() rewrites what has one correct answer: dashes, thread
+//      numbering, markdown, curly quotes. No model call, no judgment.
+//   2. scanSlop() reports what is left.
+//   3. If any HARD finding survives, ONE repair round-trip, quoting the findings.
+//      Rare in practice because step 1 already covers the two most common ones.
+//
+// Whatever still fails after that rides along on the option as `slop`, so the
+// operator sees the specific line instead of a vague low score.
+// ---------------------------------------------------------------------------
+async function polish(options: CopyOption[], analogSources: { title: string; url: string }[]): Promise<CopyOption[]> {
+  const fixed = options.map((o) => {
+    const text = autoFixSlop(o.text);
+    return { ...o, text, slop: scanSlop(text) };
+  });
+
+  const failing = fixed.filter((o) => hardFindings(o.slop ?? []).length > 0);
+  if (!failing.length || process.env.COPY_SLOP_REPAIR === "off") {
+    if (failing.length) console.log(`[generateCopy] slop repair skipped (COPY_SLOP_REPAIR=off), ${failing.length} draft(s) failing`);
+    return fixed;
+  }
+
+  console.log(`[generateCopy] slop repair: ${failing.length}/${fixed.length} draft(s) with hard findings`);
+
+  const repairPrompt = [
+    ANTI_SLOP_BRIEF,
+    "",
+    "The drafts below failed the mechanical anti-slop check. Fix ONLY what is flagged.",
+    "Keep the angle, the argument, the facts, the length band and any URL EXACTLY as they are.",
+    "Do not smooth the voice, do not re-hedge a claim, do not add a closing line.",
+    "",
+    ...failing.map((o, i) =>
+      [
+        `DRAFT ${i + 1}:`,
+        `"""${o.text}"""`,
+        `FINDINGS:`,
+        findingsForRepair(o.slop ?? []),
+        "",
+      ].join("\n"),
+    ),
+    `Return STRICT JSON only, no prose, no code fences:`,
+    `[{"i": <the draft number>, "text": "<the corrected draft>"}]`,
+  ].join("\n");
+
+  try {
+    const repaired = await runRepair(sanitizePrompt(repairPrompt));
+    for (const r of repaired) {
+      const target = failing[r.i - 1];
+      if (!target || !r.text) continue;
+      const text = autoFixSlop(r.text);
+      // Only accept the repair if it actually reduced the hard findings. A
+      // repair that makes it worse is worse than the draft we already had.
+      const after = scanSlop(text);
+      if (hardFindings(after).length < hardFindings(target.slop ?? []).length) {
+        target.text = text;
+        target.slop = after;
+      }
+    }
+  } catch (e) {
+    // A failed repair is not a failed generation. The operator still gets the
+    // drafts, with the findings attached and visible.
+    console.log(`[generateCopy] slop repair failed, returning drafts with findings: ${e instanceof Error ? e.message : e}`);
+  }
+
+  // The repair may have touched a URL despite being told not to, so the citation
+  // goes back through the same reconciliation the first pass used.
+  return reconcileSources(fixed, analogSources);
+}
+
+async function runRepair(prompt: string): Promise<{ i: number; text: string }[]> {
+  let raw: string;
+  if (chosenBackend() === "cli") {
+    const { text } = await runClaudeCli("You are a precise copy editor. You return JSON and nothing else.", prompt);
+    raw = text;
+  } else {
+    const msg = await client().messages.create({
+      model: MODEL,
+      max_tokens: 2000,
+      system: "You are a precise copy editor. You return JSON and nothing else.",
+      messages: [{ role: "user", content: prompt }],
+    });
+    const t = msg.content.find((b) => b.type === "text");
+    raw = t && t.type === "text" ? t.text : "";
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripFences(raw));
+  } catch {
+    const m = raw.match(/\[[\s\S]*\]/);
+    parsed = m ? JSON.parse(m[0]) : [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((r): r is { i: number; text: string } => !!r && typeof r === "object" && typeof (r as { text?: unknown }).text === "string")
+    .map((r) => ({ i: Number(r.i), text: String(r.text).slice(0, 2400) }));
 }

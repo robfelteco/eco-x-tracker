@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useAction, ActionProgress } from "./useAction";
 import { TEMPLATE_DEFS, type Template } from "@/lib/taxonomy";
 
 // Inline template picker for a post row. Changing it re-files the post into the
@@ -19,6 +20,7 @@ export function ReorganizeSelect({
   const [value, setValue] = useState<Template | "">(current ?? "");
   const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
   const router = useRouter();
+  const act = useAction("label");
 
   async function onChange(next: Template) {
     if (next === value) return;
@@ -26,12 +28,14 @@ export function ReorganizeSelect({
     setValue(next);
     setState("saving");
     try {
-      const res = await fetch("/api/label", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ postId, template: next }),
+      await act.run(async () => {
+        const res = await fetch("/api/label", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ postId, template: next }),
+        });
+        if (!res.ok) throw new Error(String(res.status));
       });
-      if (!res.ok) throw new Error(String(res.status));
       setState("done");
       setTimeout(() => router.refresh(), 350);
     } catch {
@@ -50,6 +54,7 @@ export function ReorganizeSelect({
           : "border-white/10 hover:border-white/25";
 
   return (
+    <div className="max-w-[150px]">
     <select
       aria-label="Reorganize into another template"
       value={value}
@@ -68,5 +73,7 @@ export function ReorganizeSelect({
         </option>
       ))}
     </select>
+      <ActionProgress state={act.state} />
+    </div>
   );
 }

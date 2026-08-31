@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useAction, ActionProgress } from "./useAction";
 
 // One candidate row in the quote review queue (spec §11).
 //
@@ -68,6 +69,7 @@ export function QuoteCard({ q, onReviewed }: { q: QuoteCandidate; onReviewed: (i
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const act = useAction("review");
   const [done, setDone] = useState<string | null>(null);
   const tier = tierBadge(q.orgTier);
   const words = q.quoteText.trim().split(/\s+/).length;
@@ -75,12 +77,14 @@ export function QuoteCard({ q, onReviewed }: { q: QuoteCandidate; onReviewed: (i
   async function review(action: "approve" | "reject", reason?: string) {
     setBusy(true);
     try {
-      const res = await fetch("/api/quotes/review", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: q.id, action, reason }),
+      const data = await act.run(async () => {
+        const res = await fetch("/api/quotes/review", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: q.id, action, reason }),
+        });
+        return res.json();
       });
-      const data = await res.json();
       if (data.ok) {
         setDone(action === "approve" ? "Approved" : "Rejected");
         onReviewed(q.id);
@@ -222,6 +226,7 @@ export function QuoteCard({ q, onReviewed }: { q: QuoteCandidate; onReviewed: (i
           </button>
         )}
       </div>
+      <ActionProgress state={act.state} className="max-w-[220px]" />
     </div>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useAction, ActionProgress } from "./useAction";
 import { TEMPLATE_DEFS, TEMPLATE_BY_ID, type Template } from "@/lib/taxonomy";
 import type { ReviewRow } from "@/lib/queries";
 import { Tag } from "@/app/components/ui";
@@ -14,6 +15,7 @@ export function ReviewCard({ post }: { post: ReviewRow }) {
   const [saving, setSaving] = useState<Template | null>(null);
   const [done, setDone] = useState<Template | null>(null);
   const router = useRouter();
+  const act = useAction("label");
 
   const img = pickThumb(post);
   const guess = post.template ? TEMPLATE_BY_ID[post.template]?.label ?? post.template : null;
@@ -21,11 +23,13 @@ export function ReviewCard({ post }: { post: ReviewRow }) {
   async function label(template: Template) {
     setSaving(template);
     try {
-      const res = await fetch("/api/label", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ postId: post.id, template }),
-      });
+      const res = await act.run(async () =>
+        fetch("/api/label", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ postId: post.id, template }),
+        }),
+      );
       if (res.ok) {
         setDone(template);
         setTimeout(() => router.refresh(), 400);
@@ -104,6 +108,7 @@ export function ReviewCard({ post }: { post: ReviewRow }) {
           );
         })}
       </div>
+      <ActionProgress state={act.state} className="max-w-[220px]" />
     </div>
   );
 }
