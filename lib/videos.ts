@@ -475,7 +475,7 @@ export async function getVideoShelf(): Promise<VideoShelfRow[]> {
       WHERE p.template = 'short_form_video_eco' AND p.is_reply = false
     )
     SELECT
-      v.id,
+      v.id::int,
       v.yt_video_id       AS "ytVideoId",
       v.yt_url            AS "ytUrl",
       to_char(v.yt_published_on, 'YYYY-MM-DD') AS "ytPublishedOn",
@@ -499,7 +499,7 @@ export async function getVideoShelf(): Promise<VideoShelfRow[]> {
     GROUP BY v.id`;
 
   const useRows = await sql<VideoUse & { videoId: number | null }>`
-    SELECT p.video_id AS "videoId", p.id, p.url, p.created_at AS "createdAt",
+    SELECT p.video_id::int AS "videoId", p.id, p.url, p.created_at AS "createdAt",
            EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo",
            p.text, s.impressions
     FROM posts p

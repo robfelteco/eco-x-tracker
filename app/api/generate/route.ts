@@ -6,6 +6,27 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+// Postgres bigint comes back from the driver as a STRING, not a number — the
+// driver has no way to know the value is inside JS's safe integer range, so it
+// refuses to guess. Every id on the shelves (articles, doc_pages, videos) is a
+// bigint identity, so they all arrive here as "30" rather than 30.
+//
+// The old check was Number.isFinite(articleId), which is false for a string.
+// So every article-, docs- and video-backed draft silently lost its source and
+// fell through to the pillar-only prompt — the drafter then invented facts that
+// were plausible but appeared in no piece we published. It only became visible
+// when the chain pillar started failing loudly instead of drafting unsourced.
+//
+// Coerce rather than validate, and reject only what genuinely is not an id.
+function toId(v: unknown): number | null {
+  if (typeof v === "number") return Number.isSafeInteger(v) && v > 0 ? v : null;
+  if (typeof v === "string" && /^\d+$/.test(v)) {
+    const n = Number(v);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
 // Draft starting-point copy for one recommendation. Spends Anthropic credits, so
 // it only runs on an explicit click (never on page load). Left open in V1 like
 // the other write endpoints; tightens once @eco.com auth lands.
@@ -20,9 +41,9 @@ export async function POST(req: NextRequest) {
       template,
       chain: typeof chain === "string" && chain ? chain : null,
       product: typeof product === "string" && product ? product : null,
-      articleId: Number.isFinite(articleId) ? Number(articleId) : null,
-      docPageId: Number.isFinite(docPageId) ? Number(docPageId) : null,
-      videoId: Number.isFinite(videoId) ? Number(videoId) : null,
+      articleId: toId(articleId),
+      docPageId: toId(docPageId),
+      videoId: toId(videoId),
       analogId: typeof analogId === "string" && analogId ? analogId : null,
       eduShape: typeof eduShape === "string" && eduShape ? eduShape : null,
       shape: typeof shape === "string" && shape ? shape : null,

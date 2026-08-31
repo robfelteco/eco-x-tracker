@@ -503,7 +503,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     priorTexts: string[];
   }>`
     SELECT a.chain,
-           a.id                        AS "articleId",
+           a.id::int                   AS "articleId",
            a.title,
            a.share_url                 AS "shareUrl",
            COALESCE(

@@ -346,7 +346,7 @@ export async function getDocShelf(): Promise<DocShelfRow[]> {
       WHERE p.template = 'dev_doc_post' AND p.is_reply = false
     )
     SELECT
-      d.id                                     AS "docPageId",
+      d.id::int                                AS "docPageId",
       d.url, d.path, d.section, d.title, d.blurb, d.hook, d.icp, d.tier,
       COUNT(u.id)::int                         AS "useCount",
       MAX(u.created_at)                        AS "lastUsed",
@@ -372,7 +372,7 @@ export async function getDocShelf(): Promise<DocShelfRow[]> {
   `;
 
   const useRows = await sql<DocUse & { docPageId: number | null }>`
-    SELECT p.doc_page_id AS "docPageId", p.id, p.url, p.created_at AS "createdAt",
+    SELECT p.doc_page_id::int AS "docPageId", p.id, p.url, p.created_at AS "createdAt",
            EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo",
            p.text, p.media_type AS "mediaType", s.impressions
     FROM posts p

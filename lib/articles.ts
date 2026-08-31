@@ -137,7 +137,7 @@ export async function getArticleShelf(
         AND (${opts.since}::timestamptz IS NULL OR p.created_at >= ${opts.since}::timestamptz)
     )
     SELECT
-      a.id                                   AS "articleId",
+      a.id::int                              AS "articleId",
       a.slug, a.title, a.dek, a.author,
       to_char(a.published_on, 'YYYY-MM-DD')  AS "publishedOn",
       a.canonical_url                        AS "canonicalUrl",
@@ -175,7 +175,7 @@ export async function getArticleShelf(
   `;
 
   const useRows = await sql<ArticleUse & { articleId: number | null }>`
-    SELECT a.id AS "articleId", p.id, p.url, p.created_at AS "createdAt",
+    SELECT a.id::int AS "articleId", p.id, p.url, p.created_at AS "createdAt",
            EXTRACT(DAY FROM now() - p.created_at)::int AS "daysAgo",
            p.text, p.media_type AS "mediaType", s.impressions,
            (a.anchor_post_id = p.id) AS "isAnchor"
