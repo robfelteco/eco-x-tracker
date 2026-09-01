@@ -22,6 +22,13 @@ import {
   findingsForRepair,
   type SlopFinding,
 } from "./antiSlop.ts";
+import {
+  buildSource,
+  recencyBlock,
+  scanRecency,
+  todayIso,
+  type RecencyContext,
+} from "./recency.ts";
 
 // In-tool "draft starting copy" — turns a prioritized recommendation into 2-3
 // on-brand X post options the operator can take to 90/10. NOT a finished-post
@@ -476,6 +483,23 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
 
   const priors = (input.priorTexts ?? []).filter((t) => t && t.trim().length > 20).slice(0, 6);
 
+  // Every dated thing this draft is allowed to argue from, with its age worked
+  // out once and shared by the prompt block and the post-return check. The
+  // drafter has no clock: handed a bare "Published: 2026-06-17" it reliably
+  // reached for "just published", because nothing in the call said what day it
+  // was. See lib/recency.ts.
+  const now = new Date();
+  const recency: RecencyContext = {
+    today: todayIso(now),
+    sources: [
+      article ? buildSource(`the source article "${article.title}"`, article.publishedOn, article.shareUrl, now) : null,
+      ...analogSources.map((sr) =>
+        buildSource(sr.publisher ? `${sr.publisher}'s "${sr.title}"` : `"${sr.title}"`, sr.publishedOn, sr.url, now),
+      ),
+      video ? buildSource(`the video "${video.title}"`, video.ytPublishedOn, video.ytUrl, now) : null,
+    ].filter((s): s is NonNullable<typeof s> => s !== null),
+  };
+
   const context = [
     `Content pillar: ${def.label} — ${def.description}`,
 
@@ -721,6 +745,11 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
       : null,
 
     "",
+    // Sits beside the anti-slop standard because it is the same kind of rule:
+    // a house standard enforced in code after the fact, so the model is better
+    // off being told the constraint than discovering it in a repair round-trip.
+    recencyBlock(recency),
+    "",
     ANTI_SLOP_BRIEF,
     "",
     "Return 2-3 distinct starting-point drafts as STRICT JSON only, no prose, no code fences:",
@@ -752,7 +781,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   // An article-backed post carries the piece's own link, never a marketing page
   // the model reached for. Curriculum posts keep their own reconcile pass.
   const linked = article?.shareUrl ? enforceLink(options, article.shareUrl, article.title) : options;
-  return polish(linked, analogSources, pinnedSource);
+  return polish(linked, analogSources, pinnedSource, recency);
 }
 
 // ---------------------------------------------------------------------------
@@ -862,10 +891,22 @@ async function polish(
   options: CopyOption[],
   analogSources: { title: string; url: string }[],
   pin?: { title: string; url: string } | null,
+  recency?: RecencyContext,
 ): Promise<CopyOption[]> {
+  // Slop and false recency are checked together and reported together. They
+  // are both "the draft came back wrong in a way a regex can prove", they both
+  // ride out on `slop` for the UI, and the repair pass has to see BOTH or the
+  // acceptance test below rejects a good repair: a rewrite that fixes an em
+  // dash while leaving "just published" in place would otherwise look like an
+  // improvement and quietly take the recency finding off the screen with it.
+  const scanAll = (text: string, citedUrl?: string | null): SlopFinding[] => [
+    ...scanSlop(text),
+    ...(recency ? scanRecency(text, recency, citedUrl) : []),
+  ];
+
   const fixed = options.map((o) => {
     const text = autoFixSlop(o.text);
-    return { ...o, text, slop: scanSlop(text) };
+    return { ...o, text, slop: scanAll(text, o.sourceUrl) };
   });
 
   const failing = fixed.filter((o) => hardFindings(o.slop ?? []).length > 0);
@@ -879,10 +920,19 @@ async function polish(
   const repairPrompt = [
     ANTI_SLOP_BRIEF,
     "",
-    "The drafts below failed the mechanical anti-slop check. Fix ONLY what is flagged.",
+    "The drafts below failed the mechanical house checks. Fix ONLY what is flagged.",
     "Keep the angle, the argument, the facts, the length band and any URL EXACTLY as they are.",
     "Do not smooth the voice, do not re-hedge a claim, do not add a closing line.",
+    // Without this carve-out the repair pass is stuck: a false-recency finding
+    // can only be fixed by changing the words that assert the date, and the
+    // line above tells it to keep the facts as they are.
+    "ONE EXCEPTION: a false-recency finding IS a fix to the words that assert a date. Remove or",
+    "correct the timestamp exactly as the finding says. Do not swap in a different timestamp, do",
+    "not soften it to 'recently', and change nothing else in the sentence.",
     "",
+    // The repair call is a fresh context, so it needs the dates too or it has
+    // no way to tell what a correct replacement would be.
+    ...(recency ? [recencyBlock(recency) ?? "", ""] : []),
     ...failing.map((o, i) =>
       [
         `DRAFT ${i + 1}:`,
@@ -904,7 +954,7 @@ async function polish(
       const text = autoFixSlop(r.text);
       // Only accept the repair if it actually reduced the hard findings. A
       // repair that makes it worse is worse than the draft we already had.
-      const after = scanSlop(text);
+      const after = scanAll(text, target.sourceUrl);
       if (hardFindings(after).length < hardFindings(target.slop ?? []).length) {
         target.text = text;
         target.slop = after;

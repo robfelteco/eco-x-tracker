@@ -268,6 +268,58 @@ risks.
 
 ---
 
+## Recency discipline
+
+Lives in `lib/recency.ts` rather than `lib/antiSlop.ts`, because it is not a
+style rule. A false timestamp is a factual error, and it is the one error a
+reader can disprove in a single click.
+
+The cause was structural. The drafter has no clock. It was handed a source with
+a bare `Published: 2026-06-17` line and nothing to compare it against, so it
+reached for the only register it had for a piece it was told to argue from. A
+draft on the ESM's AI blog opened with "The ESM just published data showing
+electronic trading climbed to 60%" eleven weeks after publication, and the 60%
+figure was not the blog's own: that post footnoted it to the ESM's November 2024
+piece. Two false timestamps in one clause, from one missing fact.
+
+So the drafter now receives today's date, every source date, and the age in days
+already worked out. Then what comes back is checked against those same dates.
+
+**Age is never the problem.** A 2019 BIS paper that explains the mechanism
+correctly beats a fresh piece that does not, and the curriculum pillar is built
+on exactly that. Dressing age as news is the problem. Nothing here flags old
+material; it flags claiming old material is new.
+
+The tiers, each a promise about *when* that needs a date recent enough **and
+precise enough** to keep:
+
+| Phrasing | Promise | Needs a source |
+|---|---|---|
+| "just published", "breaking:", "published today", "today's figures" | landed in the last day or two | ≤ 3 days old, dated to the day |
+| "this week", "a few days ago", "fresh data", "brand new" | days old | ≤ 14 days old, dated to the day |
+| "new data", "newly released", "this month", "a new report" | the current release | ≤ 60 days old, dated to the month |
+| "recently", "the latest figures" | recency in general | ≤ 400 days old (soft flag only) |
+
+Precision is enforced separately from age, because a source dated `2026` could
+mean any day in it. `2026-06` supports "in June 2026" and never "this week", no
+matter how recent 2026 is. A source with no date on file backs no timestamp at
+all.
+
+Two things the linter cannot see, so they are rules in the prompt instead:
+
+- **The publication date is not the data's date.** A recent piece routinely
+  restates an older figure, and the figure keeps its own vintage. Say where the
+  number came from, or leave the vintage out.
+- **Do not imply a source published something first.** "The ESM put a number on
+  this" is safe. "The ESM just published data showing" asserts a date *and* an
+  origin, and both can be wrong at once.
+
+`recently` and `the latest figures` are soft on purpose: the latest figures
+really can be two years old if nobody has published since. The operator sees the
+flag; no repair round-trip is spent on it.
+
+---
+
 ## The check, run before any draft is returned
 
 1. Is it one post, with no thread markers?
@@ -277,6 +329,8 @@ risks.
 5. Would the opening line survive being moved to a competitor's account? If yes,
    it is filler.
 6. Is there a number, a named system, or a dated fact in the first three lines?
+6b. Does every claim about *when* survive the source dates? "Just published" is
+    checked in code, and so is the precision of the date behind it.
 7. Does the payload deliver what the first line implies? An overpromised hook is
    penalized directly by the click-dwell term.
 8. Does it end on something concrete or open, not a kicker or a recap?
