@@ -532,6 +532,12 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
     // whether the concept is worth a post today.
     note: r.breaksWhere,
     sources: r.sources.map((s) => ({
+      // The id is what makes a source individually draftable. Number(), not the
+      // raw value: analog_sources.id is a bigint, and the Neon driver hands
+      // those back as STRINGS. The type here says number, and a string wearing
+      // that type is exactly how /api/generate ended up silently dropping every
+      // article-backed source (see the toId comment in its route).
+      id: Number(s.id),
       title: s.title,
       url: s.url,
       publisher: s.publisher,

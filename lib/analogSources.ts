@@ -46,11 +46,21 @@ export interface AnalogSource {
 // ordering on recency and capping what the drafter sees.
 export const CURRENT_RETENTION_DAYS = 365;
 
-// How many of each tier the drafter actually receives. A post needs one
+// How many of each tier reach the drafter on the LEGACY blended path, where one
+// prompt carries several sources and the model picks one. A post needs one
 // mechanism source to be correct and one recent source to be timely; handing
 // over twenty of each makes the prompt expensive and the draft vaguer.
+//
+// Per-source drafting does not use these. See draftableSources() below: when
+// each source gets its own call there is no prompt to crowd, so there is no
+// reason to hide sources from the operator.
 const DRAFT_CANONICAL = 2;
 const DRAFT_CURRENT = 2;
+
+// Ceiling on a single fan-out click. The shelf's widest concept has 8 verified
+// sources today; this exists so a future sweep that returns forty cannot turn
+// one click into forty model calls.
+export const MAX_FANOUT_SOURCES = 10;
 
 // ---------------------------------------------------------------------------
 // Read
@@ -71,7 +81,14 @@ export async function getSourcesFor(analogId: string): Promise<AnalogSource[]> {
     ORDER BY (tier = 'current') DESC,
              added_at DESC,
              (source_of = 'seed') DESC,
-             array_length(key_facts, 1) DESC NULLS LAST
+             array_length(key_facts, 1) DESC NULLS LAST,
+             -- Deterministic tiebreak. Without it, rows that match on every key
+             -- above come back in whatever order Postgres feels like, and the
+             -- three SWIFT canonicals match on ALL of them (same added_at, same
+             -- source_of, same fact count). That made the shelf reorder between
+             -- renders and, worse, made the old 2-per-tier drafting cap drop a
+             -- DIFFERENT canonical on each request.
+             id DESC
   `;
 }
 
@@ -88,6 +105,37 @@ export async function sourcesForDrafting(analogId: string): Promise<AnalogSource
   return [...canonical, ...current];
 }
 
+// Every source a draft could legitimately argue from, in shelf order.
+//
+// This is the read behind per-source drafting, and it deliberately has no cap
+// per tier. The 2-canonical/2-current limit above exists because a blended
+// prompt gets vaguer the more sources you cram into it — but when each source
+// gets its own call, that pressure disappears. The cap was also silently making
+// sources undraftable: swift_messaging has 3 canonical rows, so one of them was
+// listed on the shelf and could never be drafted from.
+export async function draftableSources(analogId: string): Promise<AnalogSource[]> {
+  const all = await getSourcesFor(analogId);
+  return all.slice(0, MAX_FANOUT_SOURCES);
+}
+
+// One source by id, for a draft grounded in that piece alone.
+//
+// analogId is required and checked, not decorative: the id arrives from the
+// browser, and a row from another concept would produce a post that teaches one
+// mechanism while citing a source about a different one.
+export async function getSourceById(id: number, analogId: string): Promise<AnalogSource | null> {
+  const rows = await sql<AnalogSource>`
+    SELECT id, analog_id AS "analogId", title, publisher, url, kind,
+           published_on AS "publishedOn", summary, key_facts AS "keyFacts",
+           verified, source_of AS "sourceOf", tier, facts_source AS "factsSource",
+           EXTRACT(DAY FROM now() - added_at)::int AS "ageDays"
+    FROM analog_sources
+    WHERE id = ${id} AND analog_id = ${analogId} AND verified = true
+      AND (expires_at IS NULL OR expires_at > now())
+  `;
+  return rows[0] ?? null;
+}
+
 // One round trip for the whole shelf, so the Prioritize page doesn't fire twenty
 // queries to render twenty rows.
 export async function getAllSources(): Promise<Map<string, AnalogSource[]>> {
@@ -99,7 +147,8 @@ export async function getAllSources(): Promise<Map<string, AnalogSource[]>> {
     FROM analog_sources
     WHERE verified = true AND (expires_at IS NULL OR expires_at > now())
     ORDER BY analog_id, (tier = 'current') DESC, added_at DESC,
-             (source_of = 'seed') DESC, array_length(key_facts, 1) DESC NULLS LAST
+             (source_of = 'seed') DESC, array_length(key_facts, 1) DESC NULLS LAST,
+             id DESC
   `;
   const map = new Map<string, AnalogSource[]>();
   for (const r of rows) {

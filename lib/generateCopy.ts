@@ -10,7 +10,7 @@ import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
 import { ICP_BY_ID } from "./icp.ts";
 import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
-import { sourcesForDrafting } from "./analogSources.ts";
+import { sourcesForDrafting, getSourceById, type AnalogSource } from "./analogSources.ts";
 import { pillarShapeBlock } from "./pillarShapes.ts";
 import {
   ANTI_SLOP_BRIEF,
@@ -130,6 +130,17 @@ export interface GenerateCopyInput {
   // A tradfi analog concept from lib/analogs.ts. When set, this is a CURRICULUM
   // post: it teaches a mechanism rather than reporting a market signal.
   analogId?: string | null;
+  // ONE row from analog_sources. When set, the draft argues from that piece and
+  // nothing else — the prompt carries a single source instead of a shortlist to
+  // choose from, and the citation is pinned to it.
+  //
+  // Why this exists: with four sources in one prompt and "pick the single source
+  // that best supports your angle", the model picked the SAME one every time —
+  // whichever had the strongest quotable fact. Every draft for swift_messaging
+  // cited one SWIFT PDF while four other verified sources went unused. Source
+  // selection belongs to the operator, one click per source, not to a model
+  // silently resolving a shortlist.
+  sourceId?: number | null;
   // Which teaching shape to take (EDUCATION_SHAPES). Curriculum posts only —
   // the seven product shapes don't apply to a concept explainer.
   eduShape?: string | null;
@@ -339,13 +350,23 @@ function enforceLink(options: CopyOption[], url: string, title: string): CopyOpt
 // returned sourceUrl must match a URL we actually verified; if it does not, we
 // try to recover it from the title, and failing that we strip the citation
 // rather than ship a link nobody checked.
-function reconcileSources(options: CopyOption[], sources: { title: string; url: string }[]): CopyOption[] {
+// `pin` is set on the per-source path. There, an unmatched citation is not an
+// ambiguity to resolve — the operator already named the piece, so the fix is to
+// correct the draft to it rather than strip the citation and ship an unsourced
+// post. Only the blended path can genuinely fail to identify what was cited.
+function reconcileSources(
+  options: CopyOption[],
+  sources: { title: string; url: string }[],
+  pin?: { title: string; url: string } | null,
+): CopyOption[] {
   if (!sources.length) return options;
   const byUrl = new Map(sources.map((s) => [s.url.replace(/\/+$/, ""), s]));
   const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
 
   return options.map((o) => {
-    if (!o.sourceUrl && !o.sourceTitle) return o;
+    // No citation at all: on the blended path there is nothing to reconcile it
+    // against, but a pinned draft still has to carry its source.
+    if (!o.sourceUrl && !o.sourceTitle && !pin) return o;
     const claimed = (o.sourceUrl ?? "").replace(/\/+$/, "");
     let match = byUrl.get(claimed);
 
@@ -354,6 +375,15 @@ function reconcileSources(options: CopyOption[], sources: { title: string; url: 
       match =
         sources.find((s) => norm(s.title) === want) ??
         sources.find((s) => norm(s.title).includes(want) || want.includes(norm(s.title)));
+    }
+
+    if (!match && pin) {
+      // The model wandered off the pinned source, or forgot to echo it. Either
+      // way the post was written from this piece and gets credited to it.
+      console.warn(
+        `[generateCopy] pinned citation to "${pin.title}"; the draft claimed ${o.sourceUrl ?? o.sourceTitle ?? "nothing"}`,
+      );
+      match = pin;
     }
 
     if (!match) {
@@ -390,10 +420,30 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;
   const video = input.videoId ? await getVideo(input.videoId) : null;
   const analog = input.analogId ? ANALOG_BY_ID[input.analogId] : null;
-  // Verified source material for this concept: a couple of canonical rows for
-  // the mechanism plus the newest current ones for timeliness. A curriculum
-  // draft is not allowed to proceed without it, see the throw below.
-  const analogSources = analog ? await sourcesForDrafting(analog.id) : [];
+  // Verified source material for this concept. Two shapes:
+  //
+  //   sourceId set  ->  exactly that row. The operator clicked "Draft from this"
+  //                     on one piece, or the concept-level fan-out is running
+  //                     this source's leg of the click. One source in, one
+  //                     source cited.
+  //   sourceId null ->  the legacy shortlist (2 canonical + 2 current) and the
+  //                     model picks. Still reachable, and still what an operator
+  //                     gets if they hit the endpoint without a source.
+  //
+  // A curriculum draft is not allowed to proceed without material either way,
+  // see the throw below.
+  const pinnedSource = analog && input.sourceId ? await getSourceById(input.sourceId, analog.id) : null;
+  if (analog && input.sourceId && !pinnedSource) {
+    throw new Error(
+      `Source ${input.sourceId} is not a verified source for "${analog.label}" any more — it may have expired ` +
+        `out of the 365-day current window. Reload the shelf and try again.`,
+    );
+  }
+  const analogSources: AnalogSource[] = pinnedSource
+    ? [pinnedSource]
+    : analog
+      ? await sourcesForDrafting(analog.id)
+      : [];
   const eduShape = input.eduShape ? EDU_SHAPE_BY_ID[input.eduShape] : null;
   // An analog concept names its own ICPs; the first is the primary reader.
   const icpId = docPage?.icp ?? video?.icp ?? analog?.icps[0] ?? null;
@@ -574,18 +624,29 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           `routing and execution layer; never an orchestrator, PSP, gateway, prime broker or bridge.`,
           analog.guardrail ? `CONCEPT GUARDRAIL: ${analog.guardrail}` : null,
           ``,
-          `SOURCE MATERIAL — you MUST ground this post in ONE of these and credit it.`,
-          `Pick the single source that best supports your angle. Do not blend several.`,
-          // Four, not six, and facts capped. The source block is the biggest
-          // thing this prompt gained, and a bloated prompt makes the CLI
-          // backend's 300s ceiling reachable — which surfaces to the operator
-          // as a timeout rather than a draft. Four well-chosen sources are
-          // already more than one post can argue from.
+          // Two shapes, because the selection question is answered in two
+          // different places. When the operator picked the piece, the model's
+          // job is to argue from it — not to re-litigate which source to use.
+          pinnedSource
+            ? `THE SOURCE — this post argues from this ONE piece. It is already chosen; use it.`
+            : `SOURCE MATERIAL — you MUST ground this post in ONE of these and credit it.`,
+          pinnedSource
+            ? `Every draft you return cites THIS source. Do not reach for another piece, and do`
+            : `Pick the single source that best supports your angle. Do not blend several.`,
+          pinnedSource
+            ? `not cite anything you were not given here. If this source cannot carry a claim you`
+            : null,
+          pinnedSource ? `want to make, drop the claim rather than sourcing it elsewhere.` : null,
+          // Facts capped either way. The source block is the biggest thing this
+          // prompt gained, and a bloated prompt makes the CLI backend's 300s
+          // ceiling reachable — which surfaces to the operator as a timeout
+          // rather than a draft. A pinned source is one entry, so the pinned
+          // path is the cheaper and faster of the two.
           ...analogSources.slice(0, 4).map((sr, i) =>
             [
-              `[${i + 1}] ${sr.title}`,
+              pinnedSource ? sr.title : `[${i + 1}] ${sr.title}`,
               sr.publisher ? `    Publisher: ${sr.publisher}${sr.publishedOn ? ` (${sr.publishedOn})` : ""}` : null,
-              `    Kind: ${sr.kind ?? "article"}   URL: ${sr.url}`,
+              `    Kind: ${sr.kind ?? "article"}   Tier: ${sr.tier}   URL: ${sr.url}`,
               sr.summary ? `    What it says: ${sr.summary}` : null,
               sr.keyFacts.length
                 ? `    Checkable claims:\n${sr.keyFacts.map((f) => `      - ${f}`).join("\n")}`
@@ -595,14 +656,29 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
               .join("\n"),
           ),
           ``,
-          `CANONICAL sources explain the mechanism and are what make the post CORRECT.`,
-          `CURRENT sources report something recent and are what make the post TIMELY.`,
-          `The strongest draft uses a CURRENT source for the hook and a CANONICAL one for the`,
-          `mechanism underneath it. If only canonical material exists, write the evergreen version.`,
+          // The tier guidance only makes sense as a CHOICE between sources. On
+          // the pinned path there is nothing to choose, so it becomes a
+          // description of what this one piece can and cannot do for the post.
+          pinnedSource
+            ? pinnedSource.tier === "current"
+              ? `This is a CURRENT source: it reports something recent, so lead with the news and let` +
+                `\nthe mechanism follow. Teach the mechanism from what this piece actually states.`
+              : `This is a CANONICAL source: it explains the mechanism itself and does not expire, so` +
+                `\nwrite the evergreen version. Do not manufacture a news hook the piece does not carry.`
+            : [
+                `CANONICAL sources explain the mechanism and are what make the post CORRECT.`,
+                `CURRENT sources report something recent and are what make the post TIMELY.`,
+                `The strongest draft uses a CURRENT source for the hook and a CANONICAL one for the`,
+                `mechanism underneath it. If only canonical material exists, write the evergreen version.`,
+              ].join("\n"),
           ``,
           `HOW TO USE IT, this is not decoration, it is the spine of the post:`,
-          `  * Build the post around a SPECIFIC claim from the source you picked. Prefer a number,`,
-          `    a named system, or a dated fact over a general statement.`,
+          pinnedSource
+            ? `  * Build the post around a SPECIFIC claim from this source. Prefer a number, a named`
+            : `  * Build the post around a SPECIFIC claim from the source you picked. Prefer a number,`,
+          pinnedSource
+            ? `    system, or a dated fact over a general statement.`
+            : `    a named system, or a dated fact over a general statement.`,
           `  * Never assert a mechanism the source does not support. If you are unsure whether the`,
           `    source backs a claim, leave the claim out. We are teaching people who work in these`,
           `    systems daily; a wrong detail costs more than a weaker post.`,
@@ -613,7 +689,19 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           `    algorithm and link opens are rewarded, so the reader gets the source where they`,
           `    are already reading. Copy the URL EXACTLY as given above; never invent, shorten`,
           `    or guess one.`,
-          `  * Return the source you used in "sourceTitle" and "sourceUrl".`,
+          pinnedSource
+            ? `  * Return this source in "sourceTitle" and "sourceUrl". They are fixed, not a choice.`
+            : `  * Return the source you used in "sourceTitle" and "sourceUrl".`,
+          // Every draft in a pinned call rests on the SAME piece, so the only
+          // axes left are the angle and the length. Said explicitly because the
+          // model's instinct with one source is to write the same post three
+          // times — which is exactly what the blended path was already doing
+          // across four sources.
+          pinnedSource
+            ? `  * All your drafts share this one source, so make them differ on ANGLE and LENGTH:` +
+              `\n    a different reader, a different claim from the piece, a different way in. Three` +
+              `\n    paraphrases of one post is a failed response.`
+            : null,
         ]
           .filter(Boolean)
           .join("\n")
@@ -660,11 +748,11 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     .filter(Boolean)
     .join("\n\n");
 
-  const options = reconcileSources(await runBackend(context), analogSources);
+  const options = reconcileSources(await runBackend(context), analogSources, pinnedSource);
   // An article-backed post carries the piece's own link, never a marketing page
   // the model reached for. Curriculum posts keep their own reconcile pass.
   const linked = article?.shareUrl ? enforceLink(options, article.shareUrl, article.title) : options;
-  return polish(linked, analogSources);
+  return polish(linked, analogSources, pinnedSource);
 }
 
 // ---------------------------------------------------------------------------
@@ -770,7 +858,11 @@ async function runApi(prompt: string): Promise<CopyOption[]> {
 // Whatever still fails after that rides along on the option as `slop`, so the
 // operator sees the specific line instead of a vague low score.
 // ---------------------------------------------------------------------------
-async function polish(options: CopyOption[], analogSources: { title: string; url: string }[]): Promise<CopyOption[]> {
+async function polish(
+  options: CopyOption[],
+  analogSources: { title: string; url: string }[],
+  pin?: { title: string; url: string } | null,
+): Promise<CopyOption[]> {
   const fixed = options.map((o) => {
     const text = autoFixSlop(o.text);
     return { ...o, text, slop: scanSlop(text) };
@@ -826,7 +918,7 @@ async function polish(options: CopyOption[], analogSources: { title: string; url
 
   // The repair may have touched a URL despite being told not to, so the citation
   // goes back through the same reconciliation the first pass used.
-  return reconcileSources(fixed, analogSources);
+  return reconcileSources(fixed, analogSources, pin);
 }
 
 async function runRepair(prompt: string): Promise<{ i: number; text: string }[]> {

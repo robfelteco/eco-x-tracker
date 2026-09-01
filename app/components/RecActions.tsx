@@ -19,6 +19,37 @@ import { QuoteDiscovery } from "./QuoteDiscovery";
 
 export type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "generic";
 
+// ---------------------------------------------------------------------------
+// Per-source draft keys.
+//
+// A curriculum concept now owns several independent draft stacks: one per source
+// plus one per mined question. They share the concept's key prefix so shape
+// picks and "which concept is open" still resolve, and each carries its own
+// options, error and busy state — drafting from source A does not blow away the
+// drafts you already liked from source B.
+// ---------------------------------------------------------------------------
+const SRC_KEY = "-src";
+
+function sourceKey(conceptKey: string, sourceId: number): string {
+  return `${conceptKey}${SRC_KEY}${sourceId}`;
+}
+
+/**
+ * A URL that resolves to a file rather than a page. 27 of the ~78 verified rows
+ * on the shelf are shaped like this (Grok's discovery pass happily returns
+ * swift.com/swift-resource/21476/download as "the" URL for a report), and
+ * whatever is stored is what gets published into the post body.
+ */
+function isAssetUrl(url: string): boolean {
+  return /\/download\/?($|\?)|\.pdf($|\?)/i.test(url);
+}
+
+/** The concept key a derived key belongs to, for state that lives on the concept. */
+function shapeScope(key: string): string {
+  const i = key.indexOf(SRC_KEY);
+  return i === -1 ? key : key.slice(0, i);
+}
+
 export interface ShapeUse {
   shape: string;
   label: string;
@@ -38,6 +69,10 @@ export interface Target {
   videoId?: number | null;
   // A curriculum concept (lib/analogs.ts). Turns the draft into a teaching post.
   analogId?: string | null;
+  // One row from analog_sources. Set on a per-source draft: the post argues from
+  // that piece alone and is credited to it, instead of the model picking a
+  // winner out of a shortlist and every draft landing on the same one.
+  sourceId?: number | null;
   // A short body under the row. The curriculum shelf uses it to show WHERE THE
   // ANALOGY BREAKS — which is both the point of the concept and the thing the
   // operator most needs to read before drafting from it.
@@ -46,6 +81,7 @@ export interface Target {
   // because the operator should be able to see what a draft will be arguing
   // from — and notice when the answer is "nothing" — before spending a draft.
   sources?: {
+    id: number;
     title: string;
     url: string;
     publisher: string | null;
@@ -67,6 +103,29 @@ export interface Target {
   // an explicit "these angles are spent" instruction — the whole point of
   // grouping by article is that iteration N+1 should not repeat iterations 1..N.
   priorTexts?: string[];
+}
+
+// The API's row shape into the shelf's. Tolerant of both, so a row that has
+// already been projected (or a future field) survives a round trip.
+function asShelfSource(r: Record<string, unknown>): NonNullable<Target["sources"]>[number] {
+  const facts = Array.isArray(r.keyFacts) ? r.keyFacts.length : null;
+  return {
+    id: Number(r.id),
+    title: String(r.title ?? ""),
+    url: String(r.url ?? ""),
+    publisher: (r.publisher as string | null) ?? null,
+    kind: (r.kind as string | null) ?? null,
+    seed: typeof r.seed === "boolean" ? r.seed : r.sourceOf === "seed",
+    tier: String(r.tier ?? "canonical"),
+    ageDays: r.ageDays == null ? null : Number(r.ageDays),
+    factsCount: facts ?? Number(r.factsCount ?? 0),
+  };
+}
+
+// The draft target for ONE source of a concept. Everything about the concept
+// rides along (analog id, priors, the break) with the source pinned on top.
+function sourceTarget(t: Target, sr: NonNullable<Target["sources"]>[number]): Target {
+  return { ...t, key: sourceKey(t.key, sr.id), sourceId: sr.id };
 }
 
 // A collapsible lane on a two-level shelf. Product Posts pioneered the shape
@@ -200,6 +259,14 @@ export function RecActions({
   // Draft state, keyed by target.key.
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
+  // Fan-out runs several drafts at once, so "which row is busy" stops being a
+  // single value. loadingKey still drives the ETA bar for a lone draft; this set
+  // is what greys the individual source buttons.
+  const [busyKeys, setBusyKeys] = useState<Record<string, true>>({});
+  // Which concept is mid fan-out, and how far it has got. A five-source click is
+  // a two-minute wait, and "3 of 5" is the only honest thing to show during it.
+  const [fanKey, setFanKey] = useState<string | null>(null);
+  const [fanDone, setFanDone] = useState<{ done: number; total: number; failed: number }>({ done: 0, total: 0, failed: 0 });
   const [optionsByKey, setOptionsByKey] = useState<Record<string, CopyOption[]>>({});
   const [errByKey, setErrByKey] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<{ key: string; idx: number } | null>(null);
@@ -231,6 +298,7 @@ export function RecActions({
   // Progress + completion chime. The per-row *Key state above still says WHICH
   // row is busy; these say how far along it is and how long is left.
   const draftAct = useAction("generate");
+  const draftAllAct = useAction("generate-all");
   const sourcesAct = useAction("analog-sources");
   const mineAct = useAction("questions");
   const discoverAct = useAction("discover");
@@ -243,13 +311,17 @@ export function RecActions({
   const isQuoteDiscovery = mode === "discovery" && template === "quote_card";
   const flatTargets = isBroadDiscovery ? discovered : targets;
 
-  async function draft(t: Target, shape?: string | null) {
-    setActiveKey(t.key);
-    setSelected(null);
-    setLoadingKey(t.key);
+  // One draft request, with no progress-bar bookkeeping around it. Split out of
+  // draft() so the fan-out can run several of these at once: useAction holds a
+  // single pending flag, so N concurrent .run() calls would have the first one
+  // to land clear the bar while the rest were still going.
+  //
+  // Resolves true on success. Never throws — a fan-out leg that fails writes its
+  // own error under its own row and leaves the other legs alone.
+  async function requestDraft(t: Target, shape?: string | null): Promise<boolean> {
+    setBusyKeys((b) => ({ ...b, [t.key]: true }));
     setErrByKey((e) => ({ ...e, [t.key]: "" }));
     try {
-      const data = await draftAct.run(async () => {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -261,24 +333,105 @@ export function RecActions({
           docPageId: t.docPageId ?? null,
           videoId: t.videoId ?? null,
           analogId: t.analogId ?? null,
+          // Set on a per-source draft. The server then builds a single-source
+          // prompt and pins the citation to that row, so the post is grounded in
+          // the piece the operator clicked rather than in whichever of four
+          // shortlisted sources had the strongest quote.
+          sourceId: t.sourceId ?? null,
           // The seven product shapes and the six teaching shapes are different
           // vocabularies; a target is only ever one kind, so the picked value
           // routes to whichever field applies.
-          eduShape: t.analogId ? (shape ?? shapeByKey[t.key] ?? null) : null,
+          //
+          // A per-source key inherits the shape picked on the CONCEPT row, since
+          // the picker lives there and applies to the whole concept.
+          eduShape: t.analogId ? (shape ?? shapeByKey[shapeScope(t.key)] ?? null) : null,
           shape: t.analogId ? null : (shape ?? shapeByKey[t.key] ?? null),
           angle: t.angle ?? null,
           basePostText: t.basePostText ?? null,
           priorTexts: t.priorTexts ?? [],
         }),
       });
-        return res.json();
-      });
-      if (data.ok) setOptionsByKey((o) => ({ ...o, [t.key]: data.options ?? [] }));
-      else setErrByKey((e) => ({ ...e, [t.key]: data.error || "Failed" }));
+      const data = await res.json();
+      if (data.ok) {
+        setOptionsByKey((o) => ({ ...o, [t.key]: data.options ?? [] }));
+        return true;
+      }
+      setErrByKey((e) => ({ ...e, [t.key]: data.error || "Failed" }));
+      return false;
     } catch (e) {
       setErrByKey((err) => ({ ...err, [t.key]: e instanceof Error ? e.message : "Failed" }));
+      return false;
+    } finally {
+      setBusyKeys((b) => {
+        const next = { ...b };
+        delete next[t.key];
+        return next;
+      });
+    }
+  }
+
+  async function draft(t: Target, shape?: string | null) {
+    setActiveKey(t.key);
+    setSelected(null);
+    setLoadingKey(t.key);
+    try {
+      await draftAct.run(() => requestDraft(t, shape));
     } finally {
       setLoadingKey(null);
+    }
+  }
+
+  // The concept-level click: one draft per verified source, each grounded in
+  // that source alone.
+  //
+  // Fanned out from the browser rather than the server on purpose. Each leg is
+  // its own function invocation, so drafts appear as they land instead of after
+  // the slowest one, a single bad source cannot take down the click, and no
+  // request has to fit N sequential model calls inside one 60s Vercel ceiling.
+  //
+  // Concurrency is capped at 3. The local CLI backend spawns a `claude` process
+  // per call; five at once is a lot of machine for one click, and the API path
+  // has per-minute limits worth staying under.
+  const FANOUT_CONCURRENCY = 3;
+  // Hard ceiling on one click, mirroring MAX_FANOUT_SOURCES in
+  // lib/analogSources.ts (not imported: that module pulls in the Neon driver,
+  // which has no business in a client bundle). The shelf's widest concept has 8
+  // sources today, so this binds on nothing — it exists so a future sweep that
+  // returns forty cannot turn one click into forty model calls.
+  const FANOUT_MAX = 10;
+
+  async function draftAllSources(t: Target) {
+    const all = sourcesByKey[t.key] ?? t.sources ?? [];
+    const srcs = all.slice(0, FANOUT_MAX);
+    if (!t.analogId || srcs.length === 0) return;
+
+    // One source is not a fan-out. Run it as a plain draft so it gets the
+    // single-draft ETA bar rather than the two-wave estimate.
+    if (srcs.length === 1) {
+      await draft(sourceTarget(t, srcs[0]));
+      return;
+    }
+
+    setActiveKey(t.key);
+    setSelected(null);
+    setFanKey(t.key);
+    setFanDone({ done: 0, total: srcs.length, failed: 0 });
+
+    const queue = [...srcs];
+    try {
+      await draftAllAct.run(async () => {
+        async function worker() {
+          for (;;) {
+            const sr = queue.shift();
+            if (!sr) return;
+            const ok = await requestDraft(sourceTarget(t, sr));
+            setFanDone((f) => ({ ...f, done: f.done + 1, failed: f.failed + (ok ? 0 : 1) }));
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(FANOUT_CONCURRENCY, queue.length) }, worker));
+      });
+    } finally {
+      setFanKey(null);
     }
   }
 
@@ -301,7 +454,16 @@ export function RecActions({
         body: JSON.stringify({
           template,
           chain: t.chain ?? null,
-          angle: [t.label, shapeByKey[t.key], opt.angle].filter(Boolean).join(" · ").slice(0, 500),
+          // shapeScope(), not t.key: on a per-source draft the key is derived,
+          // and the shape picker lives on the concept row.
+          //
+          // opt.sourceTitle rides along because with per-source drafting "which
+          // source did that post argue from" is now a real question about the
+          // history, and the pinned citation is the answer.
+          angle: [t.label, shapeByKey[shapeScope(t.key)], opt.angle, opt.sourceTitle ? `src: ${opt.sourceTitle}` : null]
+            .filter(Boolean)
+            .join(" · ")
+            .slice(0, 500),
           scoreAtUse: score,
         }),
       }));
@@ -330,7 +492,12 @@ export function RecActions({
         return res.json();
       });
       if (data.ok) {
-        setSourcesByKey((m) => ({ ...m, [t.key]: data.sources ?? [] }));
+        // /api/analog-sources returns raw AnalogSource rows, which are NOT the
+        // shape the shelf renders — sourceOf/keyFacts there, seed/factsCount
+        // here. res.json() is `any`, so this went unchecked: after a sweep the
+        // "vetted" chip and the fact count silently vanished until a reload.
+        // It matters more now that these rows carry a draft button keyed on id.
+        setSourcesByKey((m) => ({ ...m, [t.key]: (data.sources ?? []).map(asShelfSource) }));
         setSrcNoteByKey((n) => ({
           ...n,
           [t.key]: [
@@ -620,13 +787,45 @@ export function RecActions({
               {miningKey === t.key ? "Mining…" : questionsByKey[t.key] ? "Re-mine" : "Find questions"}
             </button>
           )}
-          <button
-            onClick={() => draft(t)}
-            disabled={isLoading}
-            className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/70 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
-          >
-            {isLoading ? "Drafting…" : opts ? "Redraft" : "Draft copy"}
-          </button>
+          {/* On a concept, the top-level button drafts from EVERY source — one
+              call each, so five sources give five separately grounded stacks
+              instead of three drafts that all lean on whichever source had the
+              best quote. Per-source buttons below do one at a time; this is the
+              "give me the whole set" click, and it is priced accordingly. */}
+          {t.analogId ? (
+            (() => {
+              const n = Math.min((sourcesByKey[t.key] ?? t.sources ?? []).length, FANOUT_MAX);
+              const running = fanKey === t.key;
+              return (
+                <button
+                  onClick={() => draftAllSources(t)}
+                  disabled={running || n === 0}
+                  title={
+                    n === 0
+                      ? "No verified sources yet — run Sweep now first."
+                      : n === 1
+                        ? "Draft from the one source behind this concept."
+                        : `One draft call per source, ${n} in total, run ${FANOUT_CONCURRENCY} at a time. Each post argues from a single piece and credits it. Costs ${n}× a single draft.`
+                  }
+                  className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/70 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+                >
+                  {running
+                    ? `Drafting ${fanDone.done}/${fanDone.total}…`
+                    : n > 1
+                      ? `Draft from all ${n} sources`
+                      : "Draft copy"}
+                </button>
+              );
+            })()
+          ) : (
+            <button
+              onClick={() => draft(t)}
+              disabled={isLoading}
+              className="flex-none rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-white/70 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+            >
+              {isLoading ? "Drafting…" : opts ? "Redraft" : "Draft copy"}
+            </button>
+          )}
         </div>
 
         {/* One bar per row, under the button strip. Keyed off the per-row
@@ -635,6 +834,17 @@ export function RecActions({
         {loadingKey === t.key && <ActionProgress state={draftAct.state} />}
         {findingKey === t.key && <ActionProgress state={sourcesAct.state} />}
         {miningKey === t.key && <ActionProgress state={mineAct.state} />}
+        {/* The fan-out bar is the whole click, not one leg of it, and the
+            counter under it is what actually tells you where you are. */}
+        {fanKey === t.key && (
+          <>
+            <ActionProgress state={draftAllAct.state} />
+            <p className="mt-1 font-mono text-[10px] text-white/35">
+              {fanDone.done} of {fanDone.total} sources drafted
+              {fanDone.failed > 0 && <span className="text-amber-300/70"> · {fanDone.failed} failed</span>}
+            </p>
+          </>
+        )}
 
         {/* The evidence base, listed before the teaching content. A curriculum
             draft argues FROM one of these, so seeing them — or seeing that
@@ -659,52 +869,97 @@ export function RecActions({
                   Nothing citable yet. Drafting is blocked until this concept has a source.
                 </p>
               ) : (
-                <ul className="space-y-0.5">
-                  {srcs.slice(0, 5).map((sr) => (
-                    <li key={sr.url} className="text-[11.5px] leading-snug text-white/55">
-                      <a
-                        href={sr.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-white/75 underline decoration-white/20 underline-offset-2 hover:text-eco-lightblue"
-                      >
-                        {sr.title}
-                      </a>
-                      {sr.publisher && <span className="text-white/40"> — {sr.publisher}</span>}
-                      {sr.kind && sr.kind !== "article" && (
-                        <span className="ml-1.5 font-mono text-[9.5px] uppercase tracking-wider text-white/30">{sr.kind}</span>
-                      )}
-                      <span
-                        title={
-                          sr.tier === "current"
-                            ? "Recent material. This is what lets a draft be timely."
-                            : "Explains the mechanism itself. This is what makes a draft correct."
-                        }
-                        className={`ml-1.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] ${
-                          sr.tier === "current" ? "bg-eco-lightblue/15 text-eco-lightblue" : "bg-white/[0.06] text-white/40"
-                        }`}
-                      >
-                        {sr.tier}
-                        {sr.tier === "current" && sr.ageDays != null ? ` ${sr.ageDays}d` : ""}
-                      </span>
-                      {sr.factsCount > 0 && (
-                        <span
-                          className="ml-1 font-mono text-[9.5px] text-white/25"
-                          title={`${sr.factsCount} checkable claims extracted from this piece.`}
-                        >
-                          {sr.factsCount}f
-                        </span>
-                      )}
-                      {sr.seed && (
-                        <span
-                          className="ml-1.5 rounded-full bg-emerald-400/15 px-1.5 py-0.5 font-mono text-[9.5px] text-emerald-300"
-                          title="Hand-picked — a person on the team actually read or watched this one."
-                        >
-                          vetted
-                        </span>
-                      )}
-                    </li>
-                  ))}
+                /* Every source, not the top five. The list used to be a
+                   read-only summary, so truncating it only cost information;
+                   now each row is the draft button for that piece, and a hidden
+                   row is a post you cannot write. */
+                <ul className="space-y-1">
+                  {srcs.map((sr) => {
+                    const sKey = sourceKey(t.key, sr.id);
+                    const sOpts = optionsByKey[sKey];
+                    const sBusy = !!busyKeys[sKey];
+                    return (
+                      <li key={sr.id} className="rounded-lg border border-white/[0.07] bg-white/[0.015]">
+                        <div className="flex items-start gap-2 px-2 py-1.5">
+                          <div className="min-w-0 flex-1 text-[11.5px] leading-snug text-white/55">
+                            <a
+                              href={sr.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-white/75 underline decoration-white/20 underline-offset-2 hover:text-eco-lightblue"
+                            >
+                              {sr.title}
+                            </a>
+                            {sr.publisher && <span className="text-white/40"> — {sr.publisher}</span>}
+                            {sr.kind && sr.kind !== "article" && (
+                              <span className="ml-1.5 font-mono text-[9.5px] uppercase tracking-wider text-white/30">{sr.kind}</span>
+                            )}
+                            <span
+                              title={
+                                sr.tier === "current"
+                                  ? "Recent material. This is what lets a draft be timely."
+                                  : "Explains the mechanism itself. This is what makes a draft correct."
+                              }
+                              className={`ml-1.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] ${
+                                sr.tier === "current" ? "bg-eco-lightblue/15 text-eco-lightblue" : "bg-white/[0.06] text-white/40"
+                              }`}
+                            >
+                              {sr.tier}
+                              {sr.tier === "current" && sr.ageDays != null ? ` ${sr.ageDays}d` : ""}
+                            </span>
+                            {sr.factsCount > 0 && (
+                              <span
+                                className="ml-1 font-mono text-[9.5px] text-white/25"
+                                title={`${sr.factsCount} checkable claims extracted from this piece.`}
+                              >
+                                {sr.factsCount}f
+                              </span>
+                            )}
+                            {sr.seed && (
+                              <span
+                                className="ml-1.5 rounded-full bg-emerald-400/15 px-1.5 py-0.5 font-mono text-[9.5px] text-emerald-300"
+                                title="Hand-picked — a person on the team actually read or watched this one."
+                              >
+                                vetted
+                              </span>
+                            )}
+                            {/* A citation that publishes as a raw file download
+                                reads as a dead link in a feed, and a third of
+                                the shelf's stored URLs are shaped like this.
+                                Flagged rather than hidden: the source is still
+                                good, the URL is just the wrong one to publish. */}
+                            {isAssetUrl(sr.url) && (
+                              <span
+                                className="ml-1.5 rounded-full bg-amber-400/12 px-1.5 py-0.5 font-mono text-[9.5px] text-amber-300/80"
+                                title="This URL points straight at a file download rather than a page. Drafts from it will publish that link — swap it for the landing page before posting."
+                              >
+                                file link
+                              </span>
+                            )}
+                            {sOpts && (
+                              <span className="ml-1.5 font-mono text-[9.5px] text-eco-lightblue/70">
+                                {sOpts.length} draft{sOpts.length === 1 ? "" : "s"}
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => draft(sourceTarget(t, sr))}
+                            disabled={sBusy}
+                            title={`Draft from this piece only. One model call, and every draft it returns argues from and credits "${sr.title}".`}
+                            className="flex-none rounded-full border border-white/15 px-2.5 py-0.5 text-[11px] font-medium text-white/65 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+                          >
+                            {sBusy ? "Drafting…" : sOpts ? "Redraft" : "Draft from this"}
+                          </button>
+                        </div>
+                        {/* This source's ETA bar, only when it is the lone draft
+                            running. During a fan-out the concept-level counter
+                            is the honest progress read. */}
+                        {loadingKey === sKey && <ActionProgress state={draftAct.state} className="px-2 pb-1.5" />}
+                        {/* And this source's drafts, under this source. */}
+                        {(sOpts || errByKey[sKey]) && renderDrafts(sKey, sourceTarget(t, sr))}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>

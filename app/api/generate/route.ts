@@ -32,7 +32,7 @@ function toId(v: unknown): number | null {
 // the other write endpoints; tightens once @eco.com auth lands.
 export async function POST(req: NextRequest) {
   try {
-    const { template, chain, product, articleId, docPageId, videoId, analogId, eduShape, shape, angle, basePostText, priorTexts } =
+    const { template, chain, product, articleId, docPageId, videoId, analogId, sourceId, eduShape, shape, angle, basePostText, priorTexts } =
       await req.json();
     if (!isTemplate(template)) {
       return NextResponse.json({ ok: false, error: "a valid template is required" }, { status: 400 });
@@ -45,6 +45,11 @@ export async function POST(req: NextRequest) {
       docPageId: toId(docPageId),
       videoId: toId(videoId),
       analogId: typeof analogId === "string" && analogId ? analogId : null,
+      // One source per call. The concept-level fan-out is N of these requests,
+      // issued by the client so each source's drafts land as they finish and one
+      // failing source cannot take down the whole click. Server-side fan-out
+      // would also put N sequential model calls inside a single 60s function.
+      sourceId: toId(sourceId),
       eduShape: typeof eduShape === "string" && eduShape ? eduShape : null,
       shape: typeof shape === "string" && shape ? shape : null,
       angle: typeof angle === "string" && angle ? angle.slice(0, 500) : null,

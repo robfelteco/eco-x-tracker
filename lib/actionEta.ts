@@ -16,6 +16,7 @@
 
 export type ActionKind =
   | "generate"
+  | "generate-all"
   | "discover"
   | "analog-sources"
   | "questions"
@@ -46,6 +47,17 @@ export const ACTIONS: Record<ActionKind, ActionDef> = {
     // the local median corrects it after three runs anyway.
     defaultMs: 45_000,
     note: "Writing 3 drafts, scoring each, then running the anti-slop pass.",
+  },
+  // Its own kind, not "generate", for two reasons: the duration is a different
+  // quantity (the slowest of N parallel calls, not one call), and mixing the two
+  // would poison the learned median that the single-source bar reads.
+  "generate-all": {
+    verb: "Drafting from every source",
+    // Parallel with a small concurrency cap, so this is roughly
+    // ceil(sources / CONCURRENCY) single drafts back to back. Two waves of the
+    // 45s single-draft figure.
+    defaultMs: 95_000,
+    note: "One separate draft per source, so each post argues from one piece.",
   },
   discover: {
     verb: "Finding recommendations",
