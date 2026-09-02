@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { sql } from "./db.ts";
 import { icpPromptBlock, ICP_IDS, type DocTier } from "./icp.ts";
+import { ECO_ONE_LINER } from "./positioning.ts";
 
 // Tagging pass for the docs shelf: for each page, WHO is it for, is it postable
 // at all, and what is the one thing worth building a post around.
@@ -44,10 +45,10 @@ const SYSTEM = `
 You are triaging pages of Eco's developer documentation (docs.eco.com) for use as source
 material for @eco's X (Twitter) posts.
 
-Eco is stablecoin infrastructure: a neutral platform for real-time money movement across every
-major stablecoin and blockchain. Its docs posts target two kinds of reader who might land there
-to self-serve an integration or to work out what Eco offers — developers, and business/product
-decision makers at institutional scale.
+${ECO_ONE_LINER}
+
+Its docs posts target two kinds of reader who might land there to self-serve an integration or to
+work out what Eco offers: developers, and business/product decision makers at institutional scale.
 
 For each page you are given a section, title, the docs team's own one-line description, and an
 excerpt of the page body. Return three judgments per page.

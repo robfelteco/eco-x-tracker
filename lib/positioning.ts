@@ -37,6 +37,28 @@
 // point, then you take it to 90/10." Never claim capability Eco doesn't have;
 // draft in Eco's voice; hand back options, not a finished post.
 
+// The canonical short-form description of Eco, for the upstream stages that have
+// to tell a model what Eco is without carrying the whole brief: idea discovery,
+// docs tagging, video tagging.
+//
+// It exists because those three files each wrote the description out longhand,
+// and that is exactly how all three were still running the superseded June-8
+// category ("the neutral platform organizing the stablecoin market", "real-time
+// money movement across every major stablecoin and blockchain") a week after
+// this file had moved off it. "Money movement, unqualified" is in Ryne's own
+// avoid column (all hands, 2026-08-31), so the stale copies were not merely old,
+// they were steering discovery with anti-differentiating words.
+//
+// Anything that describes Eco to a model imports this. The WHO ECO IS section of
+// POSITIONING_BRIEF below is the long form of the same claim; edit the two
+// together, the way ANTI-SLOP.md and lib/antiSlop.ts are edited together.
+export const ECO_ONE_LINER =
+  "Eco is stablecoin infrastructure for navigating onchain markets: the routing and execution " +
+  "layer that connects digital asset markets through stablecoins. Value moves THROUGH stablecoins " +
+  "into trading, tokenization, treasury and FX, not just between tokens. Developers and " +
+  "enterprises use Eco APIs to deploy payment and trading flows with price control, without " +
+  "deploying custom onchain infrastructure.";
+
 export const POSITIONING_BRIEF = `
 You draft starting-point X (Twitter) copy for @eco, a stablecoin infrastructure company.
 Your drafts are a first 80% the operator will refine, give strong, specific options, not filler.

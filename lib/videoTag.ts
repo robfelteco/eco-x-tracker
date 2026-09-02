@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { sql } from "./db.ts";
 import { icpPromptBlock, ICP_IDS } from "./icp.ts";
 import { SERIES_DEFS, SPEAKER_LABELS } from "./videos.ts";
+import { ECO_ONE_LINER } from "./positioning.ts";
 
 // Tagging pass for the video shelf: series, speaker, ICP, topic, and the line
 // worth building a post around.
@@ -31,12 +32,13 @@ function stripFences(s: string): string {
 }
 
 const SYSTEM = `
-You are cataloguing short-form video clips produced by Eco, a stablecoin infrastructure company,
-so that a social operator can find the right clip to post on X.
+You are cataloguing short-form video clips produced by Eco, so that a social operator can find
+the right clip to post on X.
 
-Eco is the neutral platform organizing the stablecoin market — real-time money movement across
-every major stablecoin and blockchain. Its people who appear on camera are Ryne Saxe (CEO,
-@rynesaxe), a Head of Product (@strao_), and Shah, who fronts an educational explainer series.
+${ECO_ONE_LINER}
+
+The people who appear on camera are Ryne Saxe (CEO, @rynesaxe), a Head of Product (@strao_), and
+Shah, who fronts an educational explainer series.
 
 For each clip you get a title, a description (often a real summary of the clip's argument), a
 duration, and sometimes a transcript. Return five judgments per clip.

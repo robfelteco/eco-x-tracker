@@ -6,6 +6,8 @@
 // piece", so the route feeds Grok an exclude-list of what @eco has already
 // posted and asks only for NEW territory.
 
+import { ECO_ONE_LINER } from "./positioning.ts";
+
 const XAI_MODEL = "grok-4.3";
 
 export interface DiscoverSource {
@@ -22,9 +24,9 @@ export interface DiscoveredItem {
   source: DiscoverSource;
 }
 
-const ECO_BRIEF = `Eco is a stablecoin infrastructure company — the neutral platform organizing the stablecoin market (issuers, liquidity managers, institutions orchestrate, clear, settle). Broad-educational posts are TOP-OF-FUNNEL: the market story carries the post and Eco's relevance rides in by implication — Eco is NOT named in the body. The reader should finish smarter about the stablecoin market.
+const ECO_BRIEF = `${ECO_ONE_LINER} Broad-educational posts are TOP-OF-FUNNEL: the market story carries the post and Eco's relevance rides in by implication, Eco is NOT named in the body. The reader should finish smarter about the stablecoin market.
 
-Two ICPs (pick ONE per idea): "institutional" (finance/payments/treasury/tokenization leaders — tradfi-fluent: orchestration, clearing, settlement, primary/secondary markets) or "developer" (stablecoin infra builders).`;
+Two ICPs (pick ONE per idea): "institutional" (finance, payments, treasury and tokenization leaders, tradfi-fluent: routing, execution, clearing, settlement, primary/secondary markets, best execution) or "developer" (stablecoin infra builders).`;
 
 const LENSES = [
   {
