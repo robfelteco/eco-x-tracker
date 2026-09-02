@@ -37,6 +37,13 @@ export interface AnalogSource {
   tier: SourceTier;
   /** 'body' when we scraped the piece, 'description' for a video we never heard. */
   factsSource: string | null;
+  /**
+   * raw_documents row holding this source's FULL text. NULL means we have never
+   * ingested the piece — only its metadata — and it is therefore NOT draftable.
+   * See migration 013: drafting from metadata is what produced posts arguing a
+   * mechanism the cited source never mentions.
+   */
+  textDocId: number | null;
   /** Days since first seen. Drives the "newest 6d" read on the shelf. */
   ageDays: number | null;
 }
@@ -71,6 +78,7 @@ export async function getSourcesFor(analogId: string): Promise<AnalogSource[]> {
     SELECT id, analog_id AS "analogId", title, publisher, url, kind,
            published_on AS "publishedOn", summary, key_facts AS "keyFacts",
            verified, source_of AS "sourceOf", tier, facts_source AS "factsSource",
+           text_doc_id AS "textDocId",
            EXTRACT(DAY FROM now() - added_at)::int AS "ageDays"
     FROM analog_sources
     WHERE analog_id = ${analogId} AND verified = true
@@ -128,6 +136,7 @@ export async function getSourceById(id: number, analogId: string): Promise<Analo
     SELECT id, analog_id AS "analogId", title, publisher, url, kind,
            published_on AS "publishedOn", summary, key_facts AS "keyFacts",
            verified, source_of AS "sourceOf", tier, facts_source AS "factsSource",
+           text_doc_id AS "textDocId",
            EXTRACT(DAY FROM now() - added_at)::int AS "ageDays"
     FROM analog_sources
     WHERE id = ${id} AND analog_id = ${analogId} AND verified = true
@@ -143,6 +152,7 @@ export async function getAllSources(): Promise<Map<string, AnalogSource[]>> {
     SELECT id, analog_id AS "analogId", title, publisher, url, kind,
            published_on AS "publishedOn", summary, key_facts AS "keyFacts",
            verified, source_of AS "sourceOf", tier, facts_source AS "factsSource",
+           text_doc_id AS "textDocId",
            EXTRACT(DAY FROM now() - added_at)::int AS "ageDays"
     FROM analog_sources
     WHERE verified = true AND (expires_at IS NULL OR expires_at > now())
@@ -375,4 +385,38 @@ export async function seedRegistrySources(): Promise<{ inserted: number; skipped
     }
   }
   return { inserted, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Grounding: the full text behind a source.
+//
+// A source row is metadata. This is the piece itself, and it is what the
+// drafter must argue from. `textDocId IS NULL` is not an edge case to work
+// around — it is the gate (migration 013).
+// ---------------------------------------------------------------------------
+
+export interface SourceText {
+  docId: number;
+  body: string;
+  segments: { speaker?: string; start_sec?: number; end_sec?: number; text: string }[] | null;
+  fetchedAt: string;
+}
+
+export async function getSourceText(source: Pick<AnalogSource, "textDocId">): Promise<SourceText | null> {
+  if (!source.textDocId) return null;
+  const rows = await sql<SourceText>`
+    SELECT id AS "docId", body, segments, fetched_at AS "fetchedAt"
+    FROM raw_documents
+    WHERE id = ${source.textDocId}
+  `;
+  const row = rows[0];
+  // A dangling pointer is the same risk as no pointer: treat it as ungrounded
+  // rather than letting an empty body through as "verified".
+  if (!row || !row.body || row.body.trim().length < 400) return null;
+  return row;
+}
+
+/** True when this source can be drafted from at all. */
+export function isGrounded(s: AnalogSource): boolean {
+  return s.textDocId != null;
 }

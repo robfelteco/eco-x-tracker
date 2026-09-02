@@ -546,6 +546,10 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
       tier: s.tier,
       ageDays: s.ageDays,
       factsCount: s.keyFacts.length,
+      // The drafting gate (migration 013). A source whose full text we have
+      // never ingested cannot be argued from, so the row says so rather than
+      // offering a button that throws.
+      grounded: s.textDocId != null,
     })),
     basePostText: null,
     angle: null,

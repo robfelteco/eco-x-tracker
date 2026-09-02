@@ -133,6 +133,8 @@ export interface TranscribeOutcome {
   quoteCandidates: number;
   verifyFailed: number;
   skipped?: string;
+  /** Windows that failed on their own, when others succeeded. */
+  partial?: string;
 }
 
 /**
@@ -274,6 +276,7 @@ export async function transcribeAndPromote(
   const already = await existingTranscript(row.videoId);
   let segments: Segment[];
   let reused = false;
+  const windowErrors: string[] = [];
   if (already && already.body.trim().length > 200) {
     segments = already.segments ?? [];
     reused = true;
@@ -283,17 +286,37 @@ export async function transcribeAndPromote(
     if (row.isShort) {
       collected.push(...(await transcribeVideo(url, participants, row.durationSec, null)));
     } else {
+      // Per window, and NOT all-or-nothing. Each window is its own Gemini
+      // request against a 280s ceiling, and a 12-minute window on a long
+      // episode does sometimes hit it. Letting that throw discarded every
+      // window that had already succeeded: a backfill run lost seven episodes
+      // outright, including both of the ones whose ungrounded drafts started
+      // this, when in most cases one window of three had timed out.
+      //
+      // A partial transcript is worth keeping. The drafter is told explicitly
+      // that the passages it gets are all it has seen of the piece, and claims
+      // are verified only against text we actually hold, so less material means
+      // a narrower post — never a less grounded one.
       for (const w of windows) {
         if (opts.deadline != null && Date.now() > opts.deadline) break;
-        collected.push(...(await transcribeVideo(url, participants, row.durationSec, w)));
+        try {
+          collected.push(...(await transcribeVideo(url, participants, row.durationSec, w)));
+        } catch (err) {
+          // VideoNotIngestedError is the fabricated-transcript gate and must
+          // still abort the whole lane — it means Gemini is not reading video
+          // at all, so every further window would return invented text.
+          if (err instanceof VideoNotIngestedError) throw err;
+          windowErrors.push(`${Math.floor(w.startSec / 60)}m-${Math.floor(w.endSec / 60)}m: ${err instanceof Error ? err.message.slice(0, 90) : String(err).slice(0, 90)}`);
+        }
       }
     }
     segments = collected.sort((a, b) => a.start_sec - b.start_sec);
   }
 
   if (!segments.length && !reused) {
-    await markTranscribe(row.videoId, "failed", null, "transcription returned nothing");
-    return { ...base, windows: windows.length, minutes, skipped: "transcription returned nothing" };
+    const why = windowErrors.length ? `every window failed — ${windowErrors[0]}` : "transcription returned nothing";
+    await markTranscribe(row.videoId, "failed", null, why);
+    return { ...base, windows: windows.length, minutes, skipped: why };
   }
 
   const body = reused && already ? already.body : segmentsToBody(segments);
@@ -323,7 +346,9 @@ export async function transcribeAndPromote(
     verifyFailed = got.verifyFailed;
   }
 
-  await markTranscribe(row.videoId, "done", docId, null);
+  // "done" with a note, not "failed": we have usable text. The note is kept so
+  // a later run can see this episode is only partly transcribed and revisit it.
+  await markTranscribe(row.videoId, "done", docId, windowErrors.length ? `partial: ${windowErrors.join("; ")}` : null);
   return {
     ...base,
     windows: windows.length,
@@ -333,6 +358,7 @@ export async function transcribeAndPromote(
     factRows: promoted.rows,
     quoteCandidates,
     verifyFailed,
+    partial: windowErrors.length ? `${windowErrors.length}/${windows.length} window(s) failed` : undefined,
   };
 }
 

@@ -10,7 +10,18 @@ import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
 import { ICP_BY_ID } from "./icp.ts";
 import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
-import { sourcesForDrafting, getSourceById, type AnalogSource } from "./analogSources.ts";
+import { sourcesForDrafting, getSourceById, getSourceText, type AnalogSource } from "./analogSources.ts";
+import {
+  selectWindows,
+  sourceCarriesConcept,
+  verifyClaims,
+  groundingFindings,
+  attributionFindings,
+  claimStillAsserted,
+  type DraftClaim,
+  type ClaimVerdict,
+} from "./sourceGrounding.ts";
+import type { TimedSegment } from "./quoteVerify.ts";
 import { pillarShapeBlock } from "./pillarShapes.ts";
 import {
   ANTI_SLOP_BRIEF,
@@ -125,6 +136,12 @@ export interface CopyOption {
   // pass. Usually empty. Surfaced in the UI so the operator sees WHY a draft is
   // weak instead of only that it scored low.
   slop?: SlopFinding[];
+  // Every assertion the draft attributes to its source, each with the verbatim
+  // span it rests on. Checked against the persisted source text, not trusted.
+  claims?: DraftClaim[];
+  // The verdict per claim, so the operator can see WHICH line failed to ground
+  // rather than only that something did.
+  claimVerdicts?: ClaimVerdict[];
 }
 
 export interface GenerateCopyInput {
@@ -322,6 +339,22 @@ function parseOptions(raw: string): CopyOption[] {
       sourceUrl: o.sourceUrl ? String(o.sourceUrl).slice(0, 500) : undefined,
       score: Number.isFinite(o.score) ? Math.max(0, Math.min(100, Math.round(Number(o.score)))) : undefined,
       scoreNote: o.scoreNote ? String(o.scoreNote).slice(0, 240) : undefined,
+      // Every claim the draft attributes to its source, with the span it rests
+      // on. Verified against the persisted source text in polish(); a draft
+      // that omits the array entirely is treated as claiming nothing, which is
+      // itself a hard finding when it also credits a source by name.
+      claims: Array.isArray((o as { claims?: unknown }).claims)
+        ? ((o as { claims: unknown[] }).claims
+            .filter(
+              (c): c is DraftClaim =>
+                !!c && typeof c === "object" && typeof (c as DraftClaim).sourceQuote === "string",
+            )
+            .map((c) => ({
+              claim: String(c.claim ?? "").slice(0, 400),
+              sourceQuote: String(c.sourceQuote ?? "").slice(0, 600),
+            }))
+            .slice(0, 12) as DraftClaim[])
+        : [],
     }))
     .slice(0, 3);
 }
@@ -466,6 +499,84 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
         `curriculum posts must argue from something citable.`,
     );
   }
+
+  // ------------------------------------------------------------------
+  // GROUNDING GATE (migration 013). The same rule as above, one level
+  // stricter, because "citable" turned out not to mean "read".
+  //
+  // A verified row proves the URL resolves. It does not prove we hold the
+  // piece. Until now the drafter got title + summary + key_facts and no
+  // source text at all, while the analog handed it a finished thesis and
+  // the prompt told it to credit the source by name. It did exactly that:
+  // two Tokenized episodes produced drafts arguing DNS/RTGS netting, a
+  // subject neither episode raises, attributed to named guests.
+  //
+  // So: no persisted text, no draft. This is a hard gate rather than a
+  // warning because the failure is invisible in the output — a fabricated
+  // attribution reads exactly like a real one.
+  // ------------------------------------------------------------------
+  if (pinnedSource && !pinnedSource.textDocId) {
+    throw new Error(
+      `"${pinnedSource.title}" has not been ingested — we hold its metadata but not the piece itself` +
+        `${pinnedSource.factsSource === "description" ? ", and its key facts came from a YouTube description rather than the episode" : ""}. ` +
+        `Drafting from metadata is what produces posts that cite a source for a claim it never makes. ` +
+        `Ingest it first (web: scripts/ingest-analog-sources.ts, podcasts: scripts/sweep-channels.ts), then draft.`,
+    );
+  }
+
+  // The gate applies to BOTH shapes. On the blended path the model picks one of
+  // several sources, so every candidate it can pick must be one we hold — an
+  // ungrounded row left in the shortlist is an ungrounded draft waiting to be
+  // chosen, and it would arrive with no text to verify against.
+  const grounded: { source: AnalogSource; body: string; windows: ReturnType<typeof selectWindows> }[] = [];
+  if (analog) {
+    // Per-source window budget: one pinned source can afford the whole budget,
+    // a shortlist has to share it or the prompt bloats past the CLI's ceiling.
+    const budgetChars = pinnedSource ? 7000 : 2600;
+    for (const s of analogSources) {
+      const text = await getSourceText(s);
+      if (!text) continue;
+      grounded.push({
+        source: s,
+        body: text.body,
+        // Vocabulary-matched retrieval, not head-truncation. The analog's own
+        // term list decides which passages the model sees, so a 55k-char
+        // transcript contributes the parts that bear on the concept instead of
+        // its first four minutes.
+        windows: selectWindows(text.body, analog.vocab ?? [], {
+          budgetChars,
+          segments: (text.segments as TimedSegment[] | null) ?? null,
+        }),
+      });
+    }
+    if (!grounded.length) {
+      throw new Error(
+        `None of the ${analogSources.length} verified source(s) for "${analog.label}" have been ingested, so ` +
+          `there is nothing to argue from and nothing to check a draft against. Run ` +
+          `scripts/ingest-analog-sources.ts (web pages) or scripts/sweep-channels.ts (podcasts) first.`,
+      );
+    }
+  }
+
+  // A source can be real, verified, on-topic for the shelf, and still say
+  // nothing about THIS mechanism. That is the netting case exactly: a genuine
+  // payments podcast that never mentions netting. Drop those rather than let
+  // the model bridge the gap from its own priors — and if that empties the
+  // list, say so plainly instead of drafting anyway.
+  const onTopic = grounded.filter((g) => sourceCarriesConcept(g.windows));
+  if (analog && !onTopic.length) {
+    const names = grounded.map((g) => `"${g.source.title}"`).slice(0, 3).join(", ");
+    throw new Error(
+      `${grounded.length === 1 ? `${names} does not discuss` : `None of ${names} discusses`} ${analog.label} — none of the concept's ` +
+        `vocabulary (${(analog.vocab ?? []).slice(0, 6).join(", ")}) appears anywhere in the ingested text. ` +
+        `Pick a source that actually covers the mechanism, or draft these against a different concept.`,
+    );
+  }
+
+  // What the model is shown, and what its claims are checked against, are the
+  // same text by construction.
+  const sourceWindows = onTopic.flatMap((g) => g.windows);
+  const verifyCorpus = onTopic.map((g) => g.body).join("\n\n");
 
   // Same rule as the curriculum shelf, for the same reason. A chain
   // announcement with no article behind it is exactly how this pillar ended up
@@ -666,19 +777,43 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           // ceiling reachable — which surfaces to the operator as a timeout
           // rather than a draft. A pinned source is one entry, so the pinned
           // path is the cheaper and faster of the two.
-          ...analogSources.slice(0, 4).map((sr, i) =>
+          ...onTopic.slice(0, 4).map(({ source: sr }, i) =>
             [
               pinnedSource ? sr.title : `[${i + 1}] ${sr.title}`,
               sr.publisher ? `    Publisher: ${sr.publisher}${sr.publishedOn ? ` (${sr.publishedOn})` : ""}` : null,
               `    Kind: ${sr.kind ?? "article"}   Tier: ${sr.tier}   URL: ${sr.url}`,
               sr.summary ? `    What it says: ${sr.summary}` : null,
+              // key_facts are a NAVIGATION aid, not evidence. For podcasts they
+              // were extracted from the YouTube description, which is how
+              // sponsor ad copy ("Fireblocks: over $100 billion in monthly
+              // stablecoin volume") ended up quoted in drafts as though a guest
+              // had said it. Labelled as untrustworthy so the model cannot
+              // treat them as citable, and superseded entirely by the passages
+              // below when we hold the text.
               sr.keyFacts.length
-                ? `    Checkable claims:\n${sr.keyFacts.map((f) => `      - ${f}`).join("\n")}`
+                ? `    Index terms (NOT quotable, NOT verified, may include sponsor copy — use only to orient):\n` +
+                  sr.keyFacts.map((f) => `      - ${f}`).join("\n")
                 : null,
             ]
               .filter(Boolean)
               .join("\n"),
           ),
+          ``,
+          // The passages. This is the evidence, and the ONLY evidence.
+          sourceWindows.length
+            ? [
+                `SOURCE PASSAGES — the actual text of the piece, retrieved on this concept's vocabulary.`,
+                `This is the ONLY evidence you have about what the source says. You have not read the rest`,
+                `of it, so you do not know what else is in there. Everything you attribute to this source`,
+                `must appear below, in these words.`,
+                ``,
+                ...sourceWindows.map(
+                  (w, i) =>
+                    `[P${i + 1}${w.startSec != null ? ` @ ${Math.floor(w.startSec / 60)}:${String(Math.floor(w.startSec % 60)).padStart(2, "0")}` : ""}]` +
+                    `${w.hits.length ? ` (mentions: ${w.hits.join(", ")})` : ""}\n"""${w.text}"""`,
+                ),
+              ].join("\n")
+            : null,
           ``,
           // The tier guidance only makes sense as a CHOICE between sources. On
           // the pinned path there is nothing to choose, so it becomes a
@@ -703,11 +838,41 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
           pinnedSource
             ? `    system, or a dated fact over a general statement.`
             : `    a named system, or a dated fact over a general statement.`,
-          `  * Never assert a mechanism the source does not support. If you are unsure whether the`,
-          `    source backs a claim, leave the claim out. We are teaching people who work in these`,
-          `    systems daily; a wrong detail costs more than a weaker post.`,
-          `  * CREDIT IT BY NAME IN THE BODY, e.g. "the BIS put a number on this", "SWIFT's own`,
-          `    documentation describes it this way".`,
+          // ------------------------------------------------------------
+          // THE SEPARATION. Two bodies of material arrive in this prompt and
+          // they have completely different standing:
+          //
+          //   THE PARALLEL / WHERE IT BREAKS  = Eco's own framing, from our
+          //       registry. Correct, ours to assert, NOT the source's.
+          //   SOURCE PASSAGES                 = what the cited piece says.
+          //
+          // Collapsing those two is the whole bug. The model was told to teach
+          // the first and credit the second, with no text to check against, so
+          // it attributed our thesis to their podcast.
+          // ------------------------------------------------------------
+          `  * TWO KINDS OF MATERIAL, AND THEY DO NOT MIX:`,
+          `      - THE PARALLEL and WHERE IT BREAKS above are OUR analysis. Assert them in our own`,
+          `        voice. NEVER write or imply that the source said them, and never put them next to`,
+          `        the credit in a way a reader would take as attribution.`,
+          `      - The SOURCE PASSAGES are the only thing you may attribute to the source.`,
+          `  * Never assert a mechanism the source does not support. If a passage does not say it,`,
+          `    the source does not say it — you have not read the rest of the piece, so you cannot`,
+          `    assume it is in there. We are teaching people who work in these systems daily; a wrong`,
+          `    detail costs more than a weaker post.`,
+          `  * If the passages will not carry the argument you want, WRITE A DIFFERENT POST. Do not`,
+          `    keep the argument and soften the attribution ("touches on", "gets at", "makes this`,
+          `    plain") — that is the failure mode, not the fix.`,
+          `  * CREDIT IT BY NAME IN THE BODY only for something a passage actually states, e.g.`,
+          `    "the BIS put a number on this", "SWIFT's own documentation describes it this way".`,
+          `  * RETURN A "claims" ARRAY. Every factual assertion you attribute to the source gets one`,
+          `    entry: the claim as written in your post, plus "sourceQuote" — the passage text it`,
+          `    rests on, COPIED VERBATIM from the passages above, long enough to be unambiguous`,
+          `    (roughly 10-30 words). These are checked mechanically against the source text. An`,
+          `    invented or paraphrased sourceQuote fails the check and the draft is rejected, so`,
+          `    copy, do not retype from memory.`,
+          `  * A post that asserts only OUR framing and makes no claim about the source returns an`,
+          `    empty claims array — and then must not credit the source by name either. That is a`,
+          `    legitimate post. Attributing to a source you cannot quote is not.`,
           `  * PUT THE LINK IN THE POST BODY TOO, on its own line. ONE POST: never a self-reply,`,
           `    never "link in reply", never "source below". There is no link penalty in the`,
           `    algorithm and link opens are rewarded, so the reader gets the source where they`,
@@ -754,7 +919,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     "",
     "Return 2-3 distinct starting-point drafts as STRICT JSON only, no prose, no code fences:",
     analog
-      ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
+      ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "claims": [{"claim": "<the assertion as written in your post>", "sourceQuote": "<the passage it rests on, copied VERBATIM from the passages above>"}], "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
       : `[{"angle": "<short label>", "text": "<the draft post>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP + pillar, why this hook>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`,
     "Each draft targets ONE ICP. Vary the angle across drafts.",
     // Repeated here, at the very end, because it is the instruction the drafter
@@ -777,11 +942,16 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     .filter(Boolean)
     .join("\n\n");
 
-  const options = reconcileSources(await runBackend(context), analogSources, pinnedSource);
+  // Reconcile against the sources the prompt ACTUALLY showed, not every
+  // verified row for the concept. An ungrounded source was filtered out
+  // upstream; letting a citation resolve back to one would re-attach the exact
+  // "cited a piece we never read" property the gate exists to remove.
+  const citable = analog ? onTopic.map((g) => g.source) : analogSources;
+  const options = reconcileSources(await runBackend(context), citable, pinnedSource);
   // An article-backed post carries the piece's own link, never a marketing page
   // the model reached for. Curriculum posts keep their own reconcile pass.
   const linked = article?.shareUrl ? enforceLink(options, article.shareUrl, article.title) : options;
-  return polish(linked, analogSources, pinnedSource, recency);
+  return polish(linked, citable, pinnedSource, recency, verifyCorpus || null);
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +1062,9 @@ async function polish(
   analogSources: { title: string; url: string }[],
   pin?: { title: string; url: string } | null,
   recency?: RecencyContext,
+  // The persisted source text. When present, every claim a draft attributes to
+  // the source is matched back against it before the draft can be returned.
+  sourceBody?: string | null,
 ): Promise<CopyOption[]> {
   // Slop and false recency are checked together and reported together. They
   // are both "the draft came back wrong in a way a regex can prove", they both
@@ -906,13 +1079,24 @@ async function polish(
 
   const fixed = options.map((o) => {
     const text = autoFixSlop(o.text);
-    return { ...o, text, slop: scanAll(text, o.sourceUrl) };
+    // Grounding rides the same channel as slop for a reason: it is the same
+    // kind of check (mechanical, provable, no judgment) and it must be
+    // impossible for a fabricated attribution to be quieter in the UI than a
+    // stray em dash. Both feed hardFindings, both feed the repair prompt.
+    const verdicts = sourceBody ? verifyClaims(o.claims ?? [], sourceBody) : [];
+    const grounding = sourceBody
+      ? [...groundingFindings(verdicts), ...attributionFindings(text, o.claims ?? [], o.sourceTitle)]
+      : [];
+    return { ...o, text, claimVerdicts: verdicts, slop: [...scanAll(text, o.sourceUrl), ...grounding] };
   });
 
   const failing = fixed.filter((o) => hardFindings(o.slop ?? []).length > 0);
   if (!failing.length || process.env.COPY_SLOP_REPAIR === "off") {
     if (failing.length) console.log(`[generateCopy] slop repair skipped (COPY_SLOP_REPAIR=off), ${failing.length} draft(s) failing`);
-    return fixed;
+    // Still filtered. COPY_SLOP_REPAIR=off turns off the REPAIR round-trip, not
+    // the grounding gate — an env var must not be able to let an unsupported
+    // claim through.
+    return dropUngrounded(fixed);
   }
 
   console.log(`[generateCopy] slop repair: ${failing.length}/${fixed.length} draft(s) with hard findings`);
@@ -929,6 +1113,16 @@ async function polish(
     "ONE EXCEPTION: a false-recency finding IS a fix to the words that assert a date. Remove or",
     "correct the timestamp exactly as the finding says. Do not swap in a different timestamp, do",
     "not soften it to 'recently', and change nothing else in the sentence.",
+    "",
+    // Second carve-out, same shape as the first. Without it the repair pass is
+    // told to keep the facts exactly as they are, which is precisely what an
+    // ungrounded claim cannot do.
+    "SECOND EXCEPTION: an 'ungrounded-claim' finding means the source does not say that. DELETE",
+    "the sentence making the claim and reflow what is left. Do NOT rescue it by hedging ('suggests',",
+    "'points to', 'touches on'), do NOT swap in a different fact, and do NOT re-attribute it to",
+    "someone else — a softened fabrication is still a fabrication. If deleting it leaves the post",
+    "without a point, return the draft unchanged and it will be dropped instead.",
+    "An 'unbacked-attribution' finding is fixed by removing the by-name credit, keeping the link.",
     "",
     // The repair call is a fresh context, so it needs the dates too or it has
     // no way to tell what a correct replacement would be.
@@ -952,12 +1146,24 @@ async function polish(
       const target = failing[r.i - 1];
       if (!target || !r.text) continue;
       const text = autoFixSlop(r.text);
+      // Re-verify grounding against the REPAIRED text. A claim the repair
+      // deleted is no longer asserted, so it is no longer checked — otherwise a
+      // correctly-fixed draft would still fail on a claim it no longer makes.
+      const stillClaimed = sourceBody
+        ? (target.claims ?? []).filter((c) => claimStillAsserted(c.claim, text))
+        : [];
+      const verdicts = sourceBody ? verifyClaims(stillClaimed, sourceBody) : [];
+      const grounding = sourceBody
+        ? [...groundingFindings(verdicts), ...attributionFindings(text, stillClaimed, target.sourceTitle)]
+        : [];
       // Only accept the repair if it actually reduced the hard findings. A
       // repair that makes it worse is worse than the draft we already had.
-      const after = scanAll(text, target.sourceUrl);
+      const after = [...scanAll(text, target.sourceUrl), ...grounding];
       if (hardFindings(after).length < hardFindings(target.slop ?? []).length) {
         target.text = text;
         target.slop = after;
+        target.claims = stillClaimed;
+        target.claimVerdicts = verdicts;
       }
     }
   } catch (e) {
@@ -968,7 +1174,42 @@ async function polish(
 
   // The repair may have touched a URL despite being told not to, so the citation
   // goes back through the same reconciliation the first pass used.
-  return reconcileSources(fixed, analogSources, pin);
+  return dropUngrounded(reconcileSources(fixed, analogSources, pin));
+}
+
+// The one finding class that is never merely "surfaced".
+//
+// Slop rides out on the option so the operator can judge it — a soft em-dash
+// finding on an otherwise good draft is information, not a veto. A claim the
+// source does not support is different in kind: it reads exactly like a true
+// one, it is the thing that gets copied into the composer, and the whole point
+// of this pass is that it must not be possible to publish. So a draft still
+// carrying an ungrounded claim after its repair round-trip does not come back
+// at all.
+//
+// Rob, on the drafts that prompted this: "i want to ensure that draft copies
+// never assume information or make claims that aren't 100% factual and backed
+// by the source material we're using for the post."
+const GROUNDING_RULES = new Set(["ungrounded-claim", "unbacked-attribution"]);
+
+function dropUngrounded(options: CopyOption[]): CopyOption[] {
+  const kept = options.filter((o) => !hardFindings(o.slop ?? []).some((f) => GROUNDING_RULES.has(f.rule)));
+  const lost = options.length - kept.length;
+  if (lost) {
+    console.warn(
+      `[generateCopy] dropped ${lost}/${options.length} draft(s) with claims the source does not support`,
+    );
+  }
+  // Better a clear failure than a thinner set of drafts the operator assumes
+  // was everything the model produced.
+  if (!kept.length && options.length) {
+    throw new Error(
+      `Every draft made a claim the source does not support, and none survived repair. This usually means ` +
+        `the source cannot carry this concept — check that the piece actually discusses the mechanism, or ` +
+        `pick a different source.`,
+    );
+  }
+  return kept;
 }
 
 async function runRepair(prompt: string): Promise<{ i: number; text: string }[]> {

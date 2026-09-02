@@ -68,6 +68,75 @@ The CLI ceiling is 90s when that fallback exists and 240s when it does not.
 which source each rule came from. `lib/antiSlop.ts` is the machine-readable copy
 of it. Edit the two together.
 
+### Grounding: a source we have not read is not draftable
+
+`lib/sourceGrounding.ts`, migration 013. This is the third rule enforced in code,
+and the one with the sharpest teeth.
+
+**What went wrong.** The curriculum drafter used to receive a source as title +
+URL + summary + `key_facts` and no source text at all, while the analog registry
+(`lib/analogs.ts`) handed it a complete TradFi thesis in `parallel` and
+`breaksWhere`, and the prompt told it to "CREDIT IT BY NAME IN THE BODY". With
+nothing to check against, it welded our thesis onto whichever piece was pinned.
+Two different Tokenized episodes each produced three drafts arguing DNS/RTGS
+netting mechanics — a subject neither episode raises — attributed to named
+guests, one of whom says the opposite on the record. The prompt already said
+"never assert a mechanism the source does not support"; that instruction could
+not be followed, because there was nothing to evaluate it against.
+
+It was not a handful of rows. At the time the gate went in, **8 of 108 verified
+sources had ever been ingested.** The shelf was almost entirely metadata.
+
+**The four gates**, in the order a draft hits them:
+
+1. **No text, no draft.** `analog_sources.text_doc_id` points at the
+   `raw_documents` row holding the piece. Null means undraftable — the shelf
+   shows a `not ingested` badge and the button is disabled. This applies to the
+   blended path too, so an ungrounded row cannot be the one the model picks.
+2. **On-topic or refused.** Passages are retrieved by the concept's own `vocab`
+   list, not by truncating the head of the document. A source whose text never
+   uses any of the concept's vocabulary is refused with a message saying so —
+   that is the netting case exactly: a real payments podcast that simply never
+   mentions netting.
+3. **Claims carry spans.** Every draft returns a `claims` array pairing each
+   assertion with the verbatim passage it rests on. Those are matched back
+   against the persisted body by `lib/quoteVerify.ts` (the same verbatim gate
+   `quote_candidates` passes through). A failed match is a HARD finding; a draft
+   still carrying one after its repair round-trip is **dropped**, not surfaced —
+   unlike slop findings, which ride out on the option for the operator to judge.
+4. **Sponsor reads are stripped first.** The original bad draft cited "Fireblocks
+   reported over $100 billion in monthly stablecoin volume" as though a guest had
+   said it. It is the mid-roll ad — and it is verbatim in the transcript, so
+   span verification alone would have passed it. Ad blocks come out of the body
+   before both retrieval and verification.
+
+The prompt also now separates the two bodies of material explicitly: `parallel` /
+`breaksWhere` are **ours** to assert, the retrieved passages are the **only**
+thing attributable to the source. Collapsing those two was the whole bug.
+
+**Partial transcripts are fine, and deliberately so.** An episode is transcribed
+window by window, and a long window sometimes hits Gemini's 280s ceiling. Those
+failures no longer discard the windows that succeeded (`transcribeAndPromote`
+catches per window and marks the row `partial:`) — the first backfill run lost
+seven episodes outright, including both of the ones whose ungrounded drafts
+started this, when in most cases one window of three had timed out. Keeping the
+rest is safe because the drafter is told the passages it receives are all it has
+seen of the piece, and claims verify only against text we actually hold. Less
+material yields a narrower post, never a less grounded one.
+
+```bash
+npx tsx scripts/check-grounding.ts        # regression check: replays both failures, no DB/network/model
+npx tsx scripts/ground-analog-sources.ts  # link sources to text we already hold
+npx tsx scripts/ingest-analog-sources.ts  # scrape the web sources we don't (Firecrawl, 1 credit/page)
+npx tsx scripts/sweep-channels.ts         # podcasts: transcription lane
+```
+
+`check-grounding.ts` asserts in both directions. Fabricated claims must fail, and
+the true ones must pass — the first cut of the ad stripper ran a char window
+forward from "brought to you by" and ate 2,884 characters of editorial content,
+which made two real claims unverifiable. A gate that cries wolf gets switched off,
+so over-stripping is treated as a bug of the same severity as under-stripping.
+
 ## Operations
 
 ### One-off scripts

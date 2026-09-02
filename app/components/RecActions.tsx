@@ -90,6 +90,8 @@ export interface Target {
     tier: string;
     ageDays: number | null;
     factsCount: number;
+    /** We hold the full text. Without it the source is not draftable at all. */
+    grounded: boolean;
   }[];
   basePostText?: string | null;
   // Small coloured chip on the row — "Hero", "Never posted", "Has file".
@@ -119,6 +121,7 @@ function asShelfSource(r: Record<string, unknown>): NonNullable<Target["sources"
     tier: String(r.tier ?? "canonical"),
     ageDays: r.ageDays == null ? null : Number(r.ageDays),
     factsCount: facts ?? Number(r.factsCount ?? 0),
+    grounded: typeof r.grounded === "boolean" ? r.grounded : r.textDocId != null,
   };
 }
 
@@ -402,7 +405,11 @@ export function RecActions({
 
   async function draftAllSources(t: Target) {
     const all = sourcesByKey[t.key] ?? t.sources ?? [];
-    const srcs = all.slice(0, FANOUT_MAX);
+    // Ungrounded sources are skipped rather than dispatched: each would be a
+    // model call that throws on the grounding gate, so a fan-out over a shelf
+    // of un-ingested rows would spend N requests to produce N identical errors.
+    // Their own rows already say "not ingested".
+    const srcs = all.filter((s) => s.grounded).slice(0, FANOUT_MAX);
     if (!t.analogId || srcs.length === 0) return;
 
     // One source is not a fan-out. Run it as a plain draft so it gets the
@@ -936,6 +943,19 @@ export function RecActions({
                                 file link
                               </span>
                             )}
+                            {/* The drafting gate. A source we hold only as
+                                metadata produced posts that cited it for
+                                claims it never made, because the drafter had
+                                nothing to check against. Shown on the row so
+                                the reason is visible before the click. */}
+                            {!sr.grounded && (
+                              <span
+                                className="ml-1.5 rounded-full bg-rose-400/12 px-1.5 py-0.5 font-mono text-[9.5px] text-rose-300/80"
+                                title="Not ingested — we have this source's metadata but not the piece itself, so nothing can verify what it actually says. Run scripts/ingest-analog-sources.ts (web) or scripts/sweep-channels.ts (podcasts) to make it draftable."
+                              >
+                                not ingested
+                              </span>
+                            )}
                             {sOpts && (
                               <span className="ml-1.5 font-mono text-[9.5px] text-eco-lightblue/70">
                                 {sOpts.length} draft{sOpts.length === 1 ? "" : "s"}
@@ -944,11 +964,15 @@ export function RecActions({
                           </div>
                           <button
                             onClick={() => draft(sourceTarget(t, sr))}
-                            disabled={sBusy}
-                            title={`Draft from this piece only. One model call, and every draft it returns argues from and credits "${sr.title}".`}
-                            className="flex-none rounded-full border border-white/15 px-2.5 py-0.5 text-[11px] font-medium text-white/65 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50"
+                            disabled={sBusy || !sr.grounded}
+                            title={
+                              sr.grounded
+                                ? `Draft from this piece only. One model call, and every draft it returns argues from and credits "${sr.title}".`
+                                : "Not draftable: we hold this source's metadata but never ingested the piece, so no claim about it can be verified. Ingest it first."
+                            }
+                            className="flex-none rounded-full border border-white/15 px-2.5 py-0.5 text-[11px] font-medium text-white/65 transition hover:border-eco-lightblue hover:text-eco-lightblue disabled:opacity-50 disabled:hover:border-white/15 disabled:hover:text-white/65"
                           >
-                            {sBusy ? "Drafting…" : sOpts ? "Redraft" : "Draft from this"}
+                            {sBusy ? "Drafting…" : !sr.grounded ? "Not ingested" : sOpts ? "Redraft" : "Draft from this"}
                           </button>
                         </div>
                         {/* This source's ETA bar, only when it is the lone draft

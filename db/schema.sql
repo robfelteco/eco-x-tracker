@@ -839,3 +839,38 @@ CREATE TABLE IF NOT EXISTS channel_sweep_state (
   quota_units       integer NOT NULL DEFAULT 0,
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- Migration 013 — GROUNDING. A curriculum source is only draftable if we hold
+-- its full text.
+--
+-- The bug this closes: the curriculum drafter received a source as title +
+-- URL + summary + key_facts and nothing else, while the ANALOG handed it a
+-- fully-formed thesis (analogs.ts `parallel` / `breaksWhere`) and the prompt
+-- told it to "CREDIT IT BY NAME IN THE BODY". With no source text in context
+-- the model could not tell whether the piece supported the thesis, so it
+-- welded the analog's argument onto whatever source was pinned. Two different
+-- Tokenized episodes produced near-identical drafts about DNS/RTGS netting —
+-- a mechanism neither episode mentions — each attributed to a named guest.
+--
+-- Worse for podcasts: 22 of 28 rows had key_facts extracted from the YouTube
+-- DESCRIPTION rather than the episode, so the "Checkable claims" block was
+-- carrying sponsor ad copy ("Fireblocks: over $100 billion in monthly
+-- stablecoin volume") straight into drafts as if a guest had said it.
+--
+-- The fix is structural rather than a stronger instruction: no persisted text,
+-- no drafting. text_doc_id is the gate.
+-- ---------------------------------------------------------------------------
+ALTER TABLE analog_sources ADD COLUMN IF NOT EXISTS text_doc_id bigint;
+
+DO $$ BEGIN
+  ALTER TABLE analog_sources
+    ADD CONSTRAINT analog_sources_text_doc_fk
+    FOREIGN KEY (text_doc_id) REFERENCES raw_documents (id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE INDEX IF NOT EXISTS analog_sources_text_doc_idx ON analog_sources (text_doc_id);
+
+-- Cheap lookup for the backfill and for the shelf's "not ingested" badge.
+CREATE INDEX IF NOT EXISTS analog_sources_ungrounded_idx
+  ON analog_sources (analog_id) WHERE text_doc_id IS NULL;

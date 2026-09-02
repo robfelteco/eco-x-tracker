@@ -182,7 +182,8 @@ if (process.argv.includes("--transcribe")) {
       `  ${o.channel.slice(0, 12).padEnd(12)} ${o.title.slice(0, 50).padEnd(50)} ` +
         `${String(o.windows).padStart(2)}w ${String(o.minutes).padStart(5)}m` +
         (o.reused ? " REUSED" : "") +
-        (o.skipped ? `  skipped: ${o.skipped}` : `  +${o.factRows} facts · ${o.quoteCandidates} quotes · ${o.verifyFailed} failed gate`),
+        (o.skipped ? `  skipped: ${o.skipped}` : `  +${o.factRows} facts · ${o.quoteCandidates} quotes · ${o.verifyFailed} failed gate`) +
+        (o.partial ? `  PARTIAL: ${o.partial}` : ""),
     );
   }
   console.log(
