@@ -23,6 +23,7 @@ import {
 } from "./sourceGrounding.ts";
 import type { TimedSegment } from "./quoteVerify.ts";
 import { pillarShapeBlock } from "./pillarShapes.ts";
+import { BAND_CONTRACT, SCORING_RUBRIC } from "./draftContract.ts";
 import {
   ANTI_SLOP_BRIEF,
   formBlock,
@@ -921,23 +922,15 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     analog
       ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "claims": [{"claim": "<the assertion as written in your post>", "sourceQuote": "<the passage it rests on, copied VERBATIM from the passages above>"}], "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
       : `[{"angle": "<short label>", "text": "<the draft post>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP + pillar, why this hook>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`,
-    "Each draft targets ONE ICP. Vary the angle across drafts.",
-    // Repeated here, at the very end, because it is the instruction the drafter
-    // drops first: left to itself every option comes back long form. Writing the
-    // band into the JSON forces the choice before the prose is written.
-    `THE THREE "band" VALUES MUST ALL DIFFER: one "tight" (under 280 chars), one "mid"`,
-    `(400-900 chars), one "long" (900-2000 chars). Write each draft to the band it`,
-    `declares. If the material cannot carry a band, say so in that draft's rationale.`,
+    // The band contract is repeated at the very end because it is the instruction
+    // the drafter drops first: left to itself every option comes back long form.
+    // Writing the band into the JSON forces the choice before the prose is.
+    // Both blocks live in lib/draftContract.ts so COPY-BRIEF.md can publish the
+    // same standard without a second copy of it. Spread, not joined, so the
+    // assembled prompt is byte-identical to before the extraction.
+    ...BAND_CONTRACT,
     "",
-    "SCORE each draft 0-100 before returning it, and let the score change the draft:",
-    "  citability (would someone paste this URL into a work channel? this is the 20.0 signal)",
-    "  conversational pull (does it earn a considered reply or quote, without bait?)",
-    "  dwell value (enough substance to hold attention)",
-    "  hook honesty (does the payload deliver what the first line implies?)",
-    "  standing out from a feed of stablecoin takes",
-    "  slop risk (does it read as machine-written?)",
-    "  length fit (is this the right band for the material?)",
-    "Anything you would score under 60, rewrite before returning it. Put the weakest dimension in scoreNote.",
+    ...SCORING_RUBRIC,
   ]
     .filter(Boolean)
     .join("\n\n");
