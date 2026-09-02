@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runSync } from "@/lib/ingest";
 import { runRuleClassification, runClaudeClassification } from "@/lib/classify";
-import { attributeUses } from "@/lib/recUses";
 import { runAnalogSweep } from "@/lib/analogSweep";
+import { runMomentumSweep } from "@/lib/chainMomentum";
 import { sql } from "@/lib/db";
 import { attributeArticles } from "@/lib/articleAttribution";
 import { syncDocPages, attributeDocPages } from "@/lib/docs";
@@ -66,7 +66,6 @@ async function handle(req: NextRequest) {
       classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
     }
 
-    // Close the recursion loop: tie any open "marked as used" recommendations to
     // Refresh the two registry-first shelves.
     //
     // Docs: llms.txt is regenerated whenever the docs site ships, so new pages
@@ -99,13 +98,29 @@ async function handle(req: NextRequest) {
       classifyErrors.push(`video shelf: ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
     }
 
-    // the @eco posts that fulfilled them (newly-classified above). Best-effort —
-    // never fails the sync.
-    let attributed = 0;
+
+    // Chain momentum — read each watched chain's own timeline and roll it up
+    // per day. Runs here, in the post sync, because that is what it is FOR: the
+    // pairing of "this chain is ripping" with "and you last mentioned it five
+    // weeks ago" only means anything if both halves are read on the same clock.
+    //
+    // Bounded on purpose. ~11 enabled chains × 5 posts ≈ 55 reads/day ≈ $0.28,
+    // and it is skipped rather than half-run when the handler is short of time,
+    // because a partial sweep would write a day row for some chains and not
+    // others and the baselines would drift apart.
+    let momentum: Awaited<ReturnType<typeof runMomentumSweep>> | null = null;
     try {
-      attributed = await attributeUses();
+      const left = 300_000 - (Date.now() - startedAt) - 30_000;
+      if (left < 30_000) {
+        momentum = { chains: 0, days: 0, reads: 0, costUsd: 0, spikes: [], warnings: ["skipped: not enough time left"] };
+      } else {
+        momentum = await runMomentumSweep(sql, { deadline: Date.now() + left });
+      }
     } catch (err) {
-      classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
+      momentum = {
+        chains: 0, days: 0, reads: 0, costUsd: 0, spikes: [],
+        warnings: [err instanceof Error ? err.message.slice(0, 200) : String(err)],
+      };
     }
 
     // ------------------------------------------------------------------
@@ -156,7 +171,7 @@ async function handle(req: NextRequest) {
         classified: { ruleSettled, claudeClassified, errors: classifyErrors },
         shelves,
         articlesMatched,
-        attributed,
+        momentum,
         sweep,
       },
       { status: result.ok ? 200 : 207 },

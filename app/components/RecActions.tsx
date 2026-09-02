@@ -5,6 +5,8 @@ import { useAction, ActionProgress } from "./useAction";
 import { NestedDisclosure } from "@/app/components/Collapse";
 import { useRouter } from "next/navigation";
 import { QuoteDiscovery } from "./QuoteDiscovery";
+import { AngleBank } from "./AngleBank";
+import type { AngleBank as Bank } from "@/lib/angleBank";
 
 // One unified action surface per recommendation.
 //
@@ -17,7 +19,7 @@ import { QuoteDiscovery } from "./QuoteDiscovery";
 //   - Product Posts is two-level: pick the product, then the piece behind it.
 //     Shapes ride along so you can see which angle that product has gone cold on.
 
-export type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "generic";
+export type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "dmv" | "generic";
 
 // ---------------------------------------------------------------------------
 // Per-source draft keys.
@@ -233,8 +235,10 @@ export function RecActions({
   broad,
   curriculum = [],
   curriculumMeta,
-  recDrivenCount = 0,
-  recDrivenVsBaseline = null,
+  trendFlag = "insufficient",
+  trendImprPct = null,
+  angleBank,
+  analogOptions = [],
 }: {
   template: string;
   score: number;
@@ -247,8 +251,10 @@ export function RecActions({
   broad?: BroadEdData;
   curriculum?: LaneGroup[];
   curriculumMeta?: CurriculumMeta;
-  recDrivenCount?: number;
-  recDrivenVsBaseline?: number | null;
+  trendFlag?: "improving" | "flat" | "declining" | "insufficient";
+  trendImprPct?: number | null;
+  angleBank?: Bank;
+  analogOptions?: { id: string; label: string }[];
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -305,10 +311,7 @@ export function RecActions({
   const sourcesAct = useAction("analog-sources");
   const mineAct = useAction("questions");
   const discoverAct = useAction("discover");
-  const useAct = useAction("use");
 
-  const [marking, setMarking] = useState(false);
-  const [markedKey, setMarkedKey] = useState<string | null>(null);
 
   const isBroadDiscovery = mode === "discovery" && template === "broad_educational";
   const isQuoteDiscovery = mode === "discovery" && template === "quote_card";
@@ -449,38 +452,6 @@ export function RecActions({
       setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1500);
     } catch {
       /* clipboard blocked */
-    }
-  }
-
-  async function markUsed(t: Target, opt: CopyOption) {
-    setMarking(true);
-    try {
-      const res = await useAct.run(async () => fetch("/api/use", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          template,
-          chain: t.chain ?? null,
-          // shapeScope(), not t.key: on a per-source draft the key is derived,
-          // and the shape picker lives on the concept row.
-          //
-          // opt.sourceTitle rides along because with per-source drafting "which
-          // source did that post argue from" is now a real question about the
-          // history, and the pinned citation is the answer.
-          angle: [t.label, shapeByKey[shapeScope(t.key)], opt.angle, opt.sourceTitle ? `src: ${opt.sourceTitle}` : null]
-            .filter(Boolean)
-            .join(" · ")
-            .slice(0, 500),
-          scoreAtUse: score,
-        }),
-      }));
-      const data = await res.json();
-      if (data.ok) {
-        setMarkedKey(t.key);
-        startTransition(() => router.refresh());
-      }
-    } finally {
-      setMarking(false);
     }
   }
 
@@ -699,24 +670,6 @@ export function RecActions({
               );
             })}
 
-            {opts && selected?.key === key && (
-              markedKey === key ? (
-                <span className="inline-block rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                  Marked as used ✓ — it&apos;ll show in History
-                </span>
-              ) : (
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    onClick={() => markUsed(target, opts[selected.idx])}
-                    disabled={marking}
-                    className="rounded-full bg-eco-blue px-3.5 py-1.5 text-xs font-medium text-white transition hover:brightness-110 disabled:opacity-50"
-                  >
-                    {marking ? "Marking…" : "Mark as used"}
-                  </button>
-                  <span className="text-[11px] text-white/35">once you post this draft</span>
-                </div>
-              )
-            )}
             {opts && opts.length > 0 && <p className="text-[10px] text-white/30">Starting points — take them to 90/10 before posting.</p>}
       </div>
     );
@@ -1100,14 +1053,23 @@ export function RecActions({
   return (
     <div className="mt-3 border-t border-white/[0.07] pt-3">
       <div className="mb-2 text-xs text-white/40">
-        {recDrivenCount > 0 ? (
+        {trendFlag !== "insufficient" && trendImprPct != null ? (
           <span>
-            {recDrivenCount} post{recDrivenCount === 1 ? "" : "s"} run from this
-            {recDrivenVsBaseline != null && (
-              <span className={recDrivenVsBaseline >= 1 ? "text-emerald-300/80" : "text-amber-300/80"}>
-                {" "}· {recDrivenVsBaseline >= 1 ? "beating" : "under"} baseline ({(recDrivenVsBaseline * 100).toFixed(0)}%)
-              </span>
-            )}
+            <span
+              className={
+                trendFlag === "improving"
+                  ? "text-emerald-300/80"
+                  : trendFlag === "declining"
+                    ? "text-amber-300/80"
+                    : "text-white/45"
+              }
+            >
+              Last 5 {trendImprPct >= 0 ? "up" : "down"} {Math.abs(trendImprPct).toFixed(0)}%
+            </span>{" "}
+            vs the 5 before ·{" "}
+            <a href="/history" className="underline decoration-white/20 hover:text-white/70">
+              trend
+            </a>
           </span>
         ) : (
           <span className="text-white/30">
@@ -1121,6 +1083,8 @@ export function RecActions({
               "Pick the audience, then the docs page. Every page on docs.eco.com is here — the ones you've never linked rank first."}
             {mode === "videos" &&
               "Pick a series, then a clip. The whole library is here — clips that have never run on X rank first."}
+            {mode === "dmv" &&
+              "Three lanes, three clocks. Integrated chains can close on Eco; non-integrated ones are a market play; market-wide data has no chain subject at all."}
             {mode === "generic" && "Draft starting copy for this pillar."}
           </span>
         )}
@@ -1136,6 +1100,28 @@ export function RecActions({
           Eco-unnamed content) but they do not share a clock: news decays, a
           concept we have never taught does not.
           ------------------------------------------------------------------ */}
+      {/* ------------------------------------------------------------------
+          The angle bank comes FIRST, and it is what used to be a draft button.
+          The drafter on this pillar could turn a source into a post; what was
+          missing sat a step earlier — the frame, and how it reaches what Eco
+          does. Jay's call on 2 Sep was to work those out by hand before
+          automating anything here, and to let the tracker keep score of them
+          meanwhile. So the pillar leads with the bank, and the two shelves below
+          are the raw material for filling it.
+          ------------------------------------------------------------------ */}
+      {isBroadDiscovery && angleBank && (
+        <div className="mb-4">
+          <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">Angle bank</span>
+            <span className="text-[11px] text-white/30">
+              the frames you&apos;ve worked out — no drafting here on purpose, this pillar is worked by hand until a
+              few of these have landed
+            </span>
+          </div>
+          <AngleBank bank={angleBank} analogs={analogOptions} />
+        </div>
+      )}
+
       {isBroadDiscovery && curriculum.length > 0 && (
         <div className="mb-4">
           <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -1196,7 +1182,7 @@ export function RecActions({
 
       {/* Docs and Videos — a lane accordion, then its rows. Same two-level shape
           as Product Posts, because both shelves are far too long to read flat. */}
-      {(mode === "docs" || mode === "videos") && (
+      {(mode === "docs" || mode === "videos" || mode === "dmv") && (
         <div className="space-y-1.5">
           {lanes.length === 0 && (
             <p className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-white/40">
@@ -1262,7 +1248,7 @@ export function RecActions({
       {/* Every other mode: a flat target list. No shape picker — the seven
           shapes were derived from the product pillar, and offering "Partner
           proof" on a thought-leadership article implies a job it doesn't have. */}
-      {mode !== "products" && mode !== "docs" && mode !== "videos" && !isQuoteDiscovery && (
+      {mode !== "products" && mode !== "docs" && mode !== "videos" && mode !== "dmv" && !isQuoteDiscovery && (
         <div className="space-y-1.5">{flatTargets.map((t) => renderTarget(t))}</div>
       )}
     </div>

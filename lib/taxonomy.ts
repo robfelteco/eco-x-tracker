@@ -32,8 +32,13 @@ export function isTemplate(v: unknown): v is Template {
 //   discovery — find NEW source material; nothing to re-run (Quote Card, Broad Ed)
 //   docs      — the docs.eco.com page shelf, grouped by ICP (Dev Doc Post)
 //   videos    — the short-form clip library, grouped by series (Short-Form Video)
+//   dmv       — the three data-visual lanes: integrated chain, non-integrated
+//               chain, market-wide (Data Motion Visual). It was "generic", the
+//               only pillar rotating on nothing, which let a run of chain
+//               visuals keep the clock fresh while market-wide data went cold
+//               with nowhere to say so. See lib/dmvLanes.ts.
 //   generic   — a single "draft something fresh" target
-export type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "generic";
+export type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "dmv" | "generic";
 
 export interface TemplateDef {
   id: Template;
@@ -51,7 +56,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
     label: "Data Motion Visual",
     description:
       "Animated/motion video presenting market data, charts, or stats (usually stablecoin market numbers). Media is video or GIF; content is a data visualization, not a person or a product demo.",
-    draftMode: "generic",
+    draftMode: "dmv",
     staleDays: 10,
   },
   {

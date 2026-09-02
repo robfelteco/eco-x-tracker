@@ -40,6 +40,7 @@ export interface AttributionPost {
   link_title: string | null;
   created_at: string;
   urls: string[]; // every expanded/resolved outbound URL, lowercased
+  quoted_post_id: string | null; // the tweet this one quotes (Migration 015)
 }
 
 export interface ArticleLite {
@@ -66,8 +67,21 @@ export interface AttributionResult {
   errors: string[];
 }
 
-// Which pillars sit on articles at all. Chain integrations, quote cards and
-// data visuals don't, so we never spend a Claude call on them.
+// Which pillars can carry an article link at all.
+//
+// This list used to be the four pillars that sit ON articles, on the reasoning
+// that a data visual or a quote card is its own artefact and has no article
+// behind it. True of the artefact, false of the POST: the most common shape in
+// the feed is a data-motion visual that quote-posts the chain integration
+// article, and filing that under "data visuals don't have articles" is what hid
+// the pairing from the scorer. The pillar clock then read New Chain
+// Integrations as weeks overdue on a morning when the chain piece had just been
+// back in front of the audience.
+//
+// So every pillar that can quote-post one of our pieces is scanned. Cost is
+// unchanged: the added pillars resolve on the free deterministic rungs (a link,
+// an X-article card, an anchor, a quoted id) and are excluded from
+// CLAUDE_MATCH_TEMPLATES below, so none of them can reach a paid call.
 export const ARTICLE_TEMPLATES = [
   "thought_leadership",
   "product_post",
@@ -76,6 +90,12 @@ export const ARTICLE_TEMPLATES = [
   // usually carried by a blog piece and then re-amplified for a fortnight. The
   // pillar still DRAFTS on chain angles, but the reuse count is worth having.
   "integration_announcement",
+  // These three PAIR with articles rather than sitting on them — they quote-post
+  // the piece. The link is what makes "we covered this subject today, in another
+  // pillar" a fact the score can read (lib/articleCoverage.ts).
+  "data_motion_visual",
+  "quote_card",
+  "short_form_video_eco",
 ];
 
 // …but only these two are worth a paid content-match. Broad Educational points
@@ -120,7 +140,7 @@ export async function attributeArticles(
   }
 
   const posts = await sql<AttributionPost>`
-    SELECT id, text, template::text AS template, link_title, created_at,
+    SELECT id, text, template::text AS template, link_title, created_at, quoted_post_id,
            COALESCE(ARRAY(SELECT lower(u->>'expanded_url') FROM jsonb_array_elements(posts.urls) u
                           WHERE u->>'expanded_url' IS NOT NULL), '{}')
              || CASE WHEN link_resolved_url IS NOT NULL THEN ARRAY[lower(link_resolved_url)] ELSE '{}'::text[] END
@@ -183,20 +203,42 @@ export async function attributeArticles(
     best.a.x_article_url = best.a.x_article_url ?? artUrl.u;
   }
 
-  // --- Rung 3: a link at an @eco status that has itself resolved. ----------
+  // --- Rung 3: a reference to an @eco status that has itself resolved. -----
+  //
+  // Two ways a post can point at another @eco post, and they need different
+  // reads. A LINK shows up in entities.urls. A QUOTE does not: the only x.com
+  // URL on a quote post is its own media (x.com/eco/status/<own id>/video/1),
+  // and the reference lives in referenced_tweets, which is why quoted_post_id
+  // is persisted (Migration 015). Both resolve the same way once you have the
+  // id, so they share one loop.
+  //
   // Iterated, because an anchor may only have resolved on this very pass.
+  const resolveStatus = (sid: string): number | undefined => {
+    // The referenced status is itself a post we've attributed…
+    const viaPost = assign.get(sid);
+    // …or it is registered as an article's anchor.
+    const viaAnchor = articles.find((a) => a.anchor_post_id === sid);
+    return viaPost?.articleId ?? viaAnchor?.id;
+  };
   for (let round = 0; round < 3; round++) {
     let changed = 0;
     for (const p of posts) {
       if (assign.has(p.id)) continue;
+      // Quoted id first — it is an exact reference, where a link has to be
+      // parsed out of a URL that might be the post's own media.
+      const quotedId = p.quoted_post_id;
+      const viaQuote = quotedId ? resolveStatus(quotedId) : undefined;
+      if (viaQuote) {
+        assign.set(p.id, { articleId: viaQuote, rung: "quoted", confidence: 0.95 });
+        changed++;
+        continue;
+      }
       for (const u of p.urls) {
         const sid = ecoStatusId(u);
-        if (!sid) continue;
-        // The linked status is itself a post we've attributed…
-        const viaPost = assign.get(sid);
-        // …or it is registered as an article's anchor.
-        const viaAnchor = articles.find((a) => a.anchor_post_id === sid);
-        const articleId = viaPost?.articleId ?? viaAnchor?.id;
+        // A quote post's own media URL parses as an @eco status — its own. It
+        // is not a reference to anything and must not resolve.
+        if (!sid || sid === p.id) continue;
+        const articleId = resolveStatus(sid);
         if (articleId) {
           assign.set(p.id, { articleId, rung: "anchor", confidence: 0.95 });
           changed++;

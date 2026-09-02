@@ -26,10 +26,12 @@ import {
 } from "@/app/components/RecActions";
 import type { DocShelfRow, HomepagePenalty } from "@/lib/docs";
 import type { VideoShelfRow } from "@/lib/videos";
+import type { DmvLane } from "@/lib/dmvLanes";
+import type { AngleBank } from "@/lib/angleBank";
 import { ICP_DEFS } from "@/lib/icp";
 import { SERIES_DEFS } from "@/lib/videos";
 import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
-import { TIER_LABEL as ANALOG_TIER_LABEL, TIER_HINT as ANALOG_TIER_HINT, type AnalogTier } from "@/lib/analogs";
+import { TIER_LABEL as ANALOG_TIER_LABEL, TIER_HINT as ANALOG_TIER_HINT, ANALOG_DEFS, type AnalogTier } from "@/lib/analogs";
 import { ExpandableCard, CollapsibleSection } from "@/app/components/Collapse";
 
 export const dynamic = "force-dynamic";
@@ -80,6 +82,8 @@ export default async function PrioritizePage({
       homepagePenalty,
       videos,
       curriculum,
+      dmvLanes,
+      angleBank,
     },
     reviewCount,
   ] = await Promise.all([getInsights(filter), getReviewCount()]);
@@ -138,6 +142,8 @@ export default async function PrioritizePage({
                 homepagePenalty={homepagePenalty}
                 videos={videos}
                 curriculum={curriculum}
+                dmvLanes={dmvLanes}
+                angleBank={angleBank}
               />
             ))}
           </div>
@@ -195,6 +201,8 @@ function buildActions(
   homepagePenalty: HomepagePenalty,
   videos: VideoShelfRow[],
   curriculum: CurriculumShelf,
+  dmvLanes: DmvLane[],
+  angleBank: AngleBank,
 ): {
   mode: DraftMode;
   targets: Target[];
@@ -205,11 +213,13 @@ function buildActions(
   broad?: BroadEdBreakdown;
   curriculum?: LaneGroup[];
   curriculumMeta?: CurriculumMeta;
+  angleBank?: AngleBank;
 } {
   const mode = TEMPLATE_BY_ID[rec.template].draftMode;
 
   if (mode === "docs") return { mode, targets: [], ...buildDocsLanes(docPages, homepagePenalty) };
   if (mode === "videos") return { mode, targets: [], ...buildVideoLanes(videos) };
+  if (mode === "dmv") return { mode, targets: [], lanes: buildDmvLaneGroups(dmvLanes) };
 
   if (mode === "articles") {
     return { mode, targets: tlArticles.map((a) => articleTarget(a)) };
@@ -249,6 +259,7 @@ function buildActions(
       mode,
       targets: [],
       broad: broadEd,
+      angleBank,
       ...buildCurriculumLanes(curriculum),
     };
   }
@@ -338,7 +349,12 @@ function articleTarget(a: ArticleShelfRow, product?: string): Target {
   };
 }
 
-type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "generic";
+type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "dmv" | "generic";
+
+// Flattened for the angle-bank dropdown. RecActions is a client component, so
+// it gets ids and labels only — never ANALOG_DEFS itself, which carries the
+// server-side briefs and would land in the browser bundle.
+const ANALOG_OPTIONS = ANALOG_DEFS.map((a) => ({ id: a.id, label: a.label }));
 
 const ACTION_LABEL: Record<DraftMode, string> = {
   chains: "Pick a chain angle · draft copy",
@@ -347,6 +363,7 @@ const ACTION_LABEL: Record<DraftMode, string> = {
   discovery: "Discover sources · draft copy",
   docs: "Pick an audience + docs page · draft copy",
   videos: "Pick a clip · draft copy",
+  dmv: "Pick a data lane · draft copy",
   generic: "Draft copy",
 };
 
@@ -566,6 +583,63 @@ function curriculumTarget(r: CurriculumRow): Target & { score: number } {
 // CEO podcast cut, a 101), and the ICP rides along on each row. Clips the team
 // filed under "Weak (Don't Use)" never appear at all.
 // ---------------------------------------------------------------------------
+// The three Data Motion Visual lanes, as lane groups so they render on the same
+// accordion the docs and video shelves use.
+//
+// Each lane's targets are its cold CHAINS (for the two chain lanes) or a single
+// "draft one" row (market-wide, which has no sub-axis). Coldest-first inside the
+// lane, and the lanes themselves stay in a fixed order — integrated, other,
+// market-wide — so the card does not reshuffle between loads.
+function buildDmvLaneGroups(lanes: DmvLane[]): LaneGroup[] {
+  return lanes.map((l) => {
+    const clock =
+      l.daysSince == null ? "never posted" : l.daysSince === 0 ? "posted today" : `last ${daysAgo(l.daysSince)}`;
+    const targets: Target[] =
+      l.id === "market_wide"
+        ? [
+            {
+              key: `dmv-${l.id}`,
+              label: "Market-wide data visual",
+              sublabel: "Supply, volume, share shifts — no single chain as the subject",
+              chain: null,
+              angle: null,
+              basePostText: null,
+            },
+          ]
+        : l.chains.length > 0
+          ? l.chains.map((c) => ({
+              key: `dmv-${l.id}-${c.chain}`,
+              label: c.label,
+              sublabel: `${c.count} visual${c.count === 1 ? "" : "s"} in this lane · last ${daysAgo(c.daysSince)}`,
+              chain: c.chain,
+              angle: null,
+              basePostText: null,
+              badges:
+                c.daysSince != null && c.daysSince > 30
+                  ? [{ label: "Cold", tone: "warn" as const, title: `${c.daysSince}d since a visual in this lane` }]
+                  : undefined,
+            }))
+          : [
+              {
+                key: `dmv-${l.id}-new`,
+                label: "No chain covered in this lane yet",
+                sublabel: "Pick a chain and draft the first one",
+                chain: null,
+                angle: null,
+                basePostText: null,
+              },
+            ];
+
+    return {
+      key: `dmv-${l.id}`,
+      label: l.label,
+      sublabel: `${l.count} post${l.count === 1 ? "" : "s"} · ${clock} · ${compact(l.medianImpr)} median impr`,
+      hint: l.hint,
+      targets,
+    };
+  });
+}
+
 function buildVideoLanes(videos: VideoShelfRow[]): { lanes: LaneGroup[]; videosMeta: VideosMeta } {
   const usable = videos.filter((v) => !v.doNotUse);
 
@@ -642,6 +716,8 @@ function shelfSummary(
   products: ProductGroup[] | undefined,
   lanes: LaneGroup[] | undefined,
   curriculumMeta?: CurriculumMeta,
+  dmvLanes?: DmvLane[],
+  angleBank?: AngleBank,
 ): { count: string | undefined; nested: boolean } {
   const prods = products ?? [];
   const groups = lanes ?? [];
@@ -650,6 +726,19 @@ function shelfSummary(
     const unit = mode === "docs" ? "pages" : "clips";
     if (groups.length === 0) return { count: "shelf empty", nested: false };
     return { count: `${groups.length} lanes \u00b7 ${total} ${unit}`, nested: true };
+  }
+  if (mode === "dmv") {
+    // Lead with how many lanes are actually cold. That is the number the split
+    // exists to surface — "3 data lanes" on its own says nothing, and the whole
+    // point is that this pillar could look fresh while two thirds of it was not.
+    const cold = (dmvLanes ?? []).filter((l) => l.readiness === "due" || l.readiness === "never");
+    if (!dmvLanes?.length) return { count: "3 data lanes", nested: true };
+    return {
+      count: cold.length
+        ? `${cold.length} of 3 lanes cold \u00b7 ${cold.map((l) => l.label.replace(/ data$/, "")).join(", ")}`
+        : "all 3 data lanes fresh",
+      nested: true,
+    };
   }
   if (mode === "products") {
     const total = prods.reduce((n, p) => n + p.targets.length, 0);
@@ -661,8 +750,11 @@ function shelfSummary(
     // with "run discovery" — the untaught count is the number that should make
     // someone open the card.
     if (curriculumMeta) {
+      const banked = angleBank?.banked ?? 0;
       return {
-        count: `${curriculumMeta.neverTaught}/${curriculumMeta.totalConcepts} concepts untaught \u00b7 + market news`,
+        count:
+          `${curriculumMeta.neverTaught}/${curriculumMeta.totalConcepts} concepts untaught \u00b7 ` +
+          `${banked} angle${banked === 1 ? "" : "s"} banked`,
         nested: true,
       };
     }
@@ -681,6 +773,8 @@ function RecCard({
   homepagePenalty,
   videos,
   curriculum,
+  dmvLanes,
+  angleBank,
 }: {
   rec: Recommendation;
   rank: number;
@@ -690,6 +784,8 @@ function RecCard({
   homepagePenalty: HomepagePenalty;
   videos: VideoShelfRow[];
   curriculum: CurriculumShelf;
+  dmvLanes: DmvLane[];
+  angleBank: AngleBank;
 }) {
   const top = rank === 1 && rec.score > 0;
   const lastType = mediaLabel(rec.lastMediaType);
@@ -703,7 +799,8 @@ function RecCard({
     broad,
     curriculum: currLanes,
     curriculumMeta,
-  } = buildActions(rec, tlArticles, broadEd, docPages, homepagePenalty, videos, curriculum);
+    angleBank: bank,
+  } = buildActions(rec, tlArticles, broadEd, docPages, homepagePenalty, videos, curriculum, dmvLanes, angleBank);
 
   // Everything above the break line — the at-a-glance read, always visible.
   const header = (
@@ -754,13 +851,13 @@ function RecCard({
   // What is behind the click, said out loud on the collapsed row. A first-time
   // reader shouldn't have to open a pillar to learn whether it has anything in
   // it — or whether it nests another level of accordions inside.
-  const shelf = shelfSummary(mode, targets, products, lanes, curriculumMeta);
+  const shelf = shelfSummary(mode, targets, products, lanes, curriculumMeta, dmvLanes, bank);
 
   return (
     <ExpandableCard
       header={header}
       highlight={top}
-      actionLabel={curriculumMeta ? "Teach a concept or discover sources · draft copy" : ACTION_LABEL[mode]}
+      actionLabel={curriculumMeta ? "Bank an angle · find sources" : ACTION_LABEL[mode]}
       count={shelf.count}
       nested={shelf.nested}
       defaultOpen={rank === 1}
@@ -777,8 +874,10 @@ function RecCard({
         broad={broad}
         curriculum={currLanes}
         curriculumMeta={curriculumMeta}
-        recDrivenCount={rec.recDrivenCount}
-        recDrivenVsBaseline={rec.recDrivenVsBaseline}
+        trendFlag={rec.trendFlag}
+        trendImprPct={rec.trendImprPct}
+        angleBank={bank}
+        analogOptions={ANALOG_OPTIONS}
       />
     </ExpandableCard>
   );

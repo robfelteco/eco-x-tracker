@@ -874,3 +874,152 @@ CREATE INDEX IF NOT EXISTS analog_sources_text_doc_idx ON analog_sources (text_d
 -- Cheap lookup for the backfill and for the shelf's "not ingested" badge.
 CREATE INDEX IF NOT EXISTS analog_sources_ungrounded_idx
   ON analog_sources (analog_id) WHERE text_doc_id IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Migration 014 — an article's PRODUCT tag gets a source, so an operator can
+-- set one the extractor cannot reach.
+--
+-- articles.product is derived deterministically from the title + dek, falling
+-- back to the body (scripts/ingest-articles.ts). That works when a piece names
+-- its product outright, and eco-integrates-b2c2 is the case where it cannot:
+-- the article says "stablecoin routing" and "programmable routing", never
+-- "Eco Routes", so no term in lib/products.ts matches and the row seeds null.
+-- It is a Routes piece regardless — the integration puts B2C2's liquidity
+-- behind Routes execution — and the shelf should file it there rather than
+-- parking it on whichever product angle happens to sort first.
+--
+-- Loosening the extractor to catch "routing" was the alternative and is worse:
+-- the same terms tag POSTS, where "routing" is ordinary vocabulary in pieces
+-- about other products entirely.
+--
+-- Same precedence as everywhere else in this schema:
+--   'derived' — extracted from the article text; re-derived on every re-seed
+--   'human'   — an operator said so; never overwritten by a re-run
+-- ---------------------------------------------------------------------------
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS product_source text NOT NULL DEFAULT 'derived';
+
+-- ---------------------------------------------------------------------------
+-- Migration 015 — the QUOTED POST id, so a pairing can be seen at all.
+--
+-- The pillar clock read "New Chain Integrations — way overdue" on a day whose
+-- most recent post was a data-motion visual quote-posting the Robinhood chain
+-- integration article. The subject had been in front of the audience that
+-- morning; the pillar had no way to know.
+--
+-- Migration 006's anchor rung was supposed to catch exactly this: a post that
+-- links an @eco status which is itself an article's anchor resolves to that
+-- article. It never fired for quote posts, because a quote post does NOT carry
+-- the quoted tweet's URL in entities.urls — the only x.com URL on the row is
+-- its own media (x.com/eco/status/<its own id>/video/1). The reference lives in
+-- referenced_tweets, which ingest read for the thumbnail (Migration 003) and
+-- then threw away. Zero of 57 data-motion visuals and zero of 22 quote cards
+-- held an article_id as a result, so the pairing signal did not exist in the
+-- data, let alone in the score.
+--
+-- Persisting the id is the whole fix on the data side: the attribution ladder
+-- gains a rung that reads it, and the pairing becomes a join.
+-- ---------------------------------------------------------------------------
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS quoted_post_id text;
+CREATE INDEX IF NOT EXISTS posts_quoted_post_idx ON posts (quoted_post_id)
+  WHERE quoted_post_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Migration 016 — recommendation_uses is RETIRED.
+--
+-- The loop it implemented ("Mark as used" → attribute the resulting post →
+-- discount pillars whose rec-driven posts flopped) was built for a workflow
+-- that did not survive contact: the copy drafter is used rarely, so the button
+-- was rarely pressed, so the signal was too sparse to move a score and the
+-- History tab was mostly empty. The pillar-level engagement trend replaces it
+-- (lib/trend.ts) — it needs no operator input and every post feeds it.
+--
+-- The TABLE is deliberately left in place. It holds real rows, dropping it
+-- would lose them, and it costs nothing empty. Nothing writes to it any more:
+-- lib/recUses.ts, /api/use and the "Mark as used" control are gone.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Migration 017 — EDUCATION ANGLES: the Broad Educational angle bank.
+--
+-- Broad Educational was the one pillar whose expanded card offered a draft it
+-- could not write. Its curriculum shelf, source sweep and grounding all work;
+-- the drafts off the back of them did not land, because the missing step is
+-- upstream of drafting — what IS the frame? "Stablecoins are inevitable" is
+-- the register we are trying to leave, and the replacement ("look at what
+-- financial routing costs today, then look at what settles on-chain — first
+-- inning") is a thing a person works out, not a thing a sweep returns.
+--
+-- So the pillar stops pretending to generate and starts keeping score of the
+-- thinking: one row per angle, where it came from, the ICP it speaks to, and
+-- whether it has been used. The card becomes "12 concepts never covered, 3
+-- angles banked" — a project-management signal, which is the job it can
+-- actually do today. Drafting stays available on the pillars that earn it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS education_angles (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- The curriculum concept this angle teaches (lib/analogs.ts id), when it maps
+  -- to one. Null is legitimate: a good angle can arrive before the concept
+  -- exists on the shelf.
+  analog_id     text,
+  frame         text NOT NULL,            -- the angle in one line, as you'd pitch it
+  mechanism     text,                     -- the TradFi thing it explains
+  eco_bridge    text,                     -- how it gets to what Eco does; the hard half
+  icp           text,                      -- 'institutional' | 'developer' | null
+  source_url    text,                     -- where the evidence lives
+  source_note   text,                     -- the number/quote worth arguing from
+  status        text NOT NULL DEFAULT 'banked',  -- 'banked' | 'used' | 'parked'
+  used_post_id  text REFERENCES posts(id) ON DELETE SET NULL,
+  used_at       timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS education_angles_status_idx ON education_angles (status);
+CREATE INDEX IF NOT EXISTS education_angles_analog_idx ON education_angles (analog_id);
+
+-- ---------------------------------------------------------------------------
+-- Migration 018 — CHAIN MOMENTUM: is the timeline paying attention to a chain?
+--
+-- The chain pillar knows when WE last posted about a chain. It has never known
+-- whether that chain is doing anything worth posting about. Both halves are
+-- needed to pick a target: Robinhood Chain was worth three posts in a fortnight
+-- because it was ripping, and a chain that is quiet is a cold angle no matter
+-- how long the pillar clock has run.
+--
+-- One row per (chain, UTC day): how many posts the chain's own account put out
+-- and what they earned. A spike is judged against that chain's OWN trailing
+-- baseline, never across chains — Base's quiet day outperforms Sei's best one,
+-- and a cross-chain comparison would only ever surface the biggest account.
+--
+-- Deliberately narrow, because reads cost money ($0.005 each): the chain's own
+-- timeline, capped posts per chain per day, integrated chains only by default.
+-- Mention-volume across all of X would be a better signal and ~50x the bill.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS chain_momentum (
+  chain         text NOT NULL,            -- lib/dimensions.ts CHAIN_LABELS id
+  day           date NOT NULL,            -- UTC day the posts landed
+  posts         int  NOT NULL DEFAULT 0,
+  likes         int  NOT NULL DEFAULT 0,
+  reposts       int  NOT NULL DEFAULT 0,
+  replies       int  NOT NULL DEFAULT 0,
+  quotes        int  NOT NULL DEFAULT 0,
+  -- The single best post of the day, kept so the UI can show WHY a chain spiked
+  -- rather than only that it did.
+  top_post_id   text,
+  top_post_text text,
+  top_post_eng  int,
+  fetched_at    timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (chain, day)
+);
+CREATE INDEX IF NOT EXISTS chain_momentum_day_idx ON chain_momentum (day DESC);
+
+-- The handle each chain's momentum is read from, and whether we scan it. Seeded
+-- from lib/chainAccounts.ts; a row here lets an operator turn a chain off (or a
+-- new one on) without a deploy.
+CREATE TABLE IF NOT EXISTS chain_momentum_sources (
+  chain      text PRIMARY KEY,
+  handle     text NOT NULL,               -- X handle, no '@'
+  user_id    text,                        -- resolved once, then reused (saves a read/day)
+  enabled    boolean NOT NULL DEFAULT true,
+  last_run   timestamptz,
+  last_error text
+);

@@ -6,7 +6,10 @@ import { getArticleShelf, type ArticleShelfRow } from "./articles.ts";
 import { getDocShelf, getHomepagePenalty, type DocShelfRow, type HomepagePenalty } from "./docs.ts";
 import { getVideoShelf, type VideoShelfRow } from "./videos.ts";
 import { getCurriculumShelf, type CurriculumShelf } from "./curriculum.ts";
-import { getRecDrivenPerf } from "./recUses.ts";
+import { getArticleCoverage, pairingVerdict, type PairableTarget } from "./articleCoverage.ts";
+import { getTemplateTrends, trendVerdict, type TemplateTrend, type TrendFlag } from "./trend.ts";
+import { getDmvLanes, dmvLaneReasons, coldestLane, type DmvLane } from "./dmvLanes.ts";
+import { getAngleBank, type AngleBank } from "./angleBank.ts";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
 // organic posts corrupts a template's baselines, so every stat is filterable.
@@ -275,8 +278,8 @@ export interface Recommendation extends TemplateStat {
   scoreReasons: string[]; // human-readable drivers behind the score ("why")
   baselineImpr: number | null; // clean performance baseline (organic, launch post excluded)
   discounted: boolean; // true when the raw median was inflated by amplified/launch posts
-  recDrivenCount: number; // # of posts this pillar has produced FROM a recommendation
-  recDrivenVsBaseline: number | null; // rec-driven median ÷ baseline (1 = on par); null if none
+  trendFlag: TrendFlag; // last-5 vs prior-5 direction ('insufficient' until 7 posts)
+  trendImprPct: number | null; // signed % change in median impressions
   easyWin: boolean; // low-effort format worth a quick post (quote card, motion visual)
   chains: ChainAngle[]; // best-performing chain angles — only meaningful for the chain pillar
   products: ProductAngle[]; // Eco products this pillar has covered, ranked
@@ -382,8 +385,14 @@ export interface Insights {
   // The curriculum shelf. Same registry-first shape as docs/videos, and for the
   // same reason: its most valuable rows are the concepts with no post attached.
   curriculum: CurriculumShelf;
+  // The three Data Motion Visual lanes (lib/dmvLanes.ts).
+  dmvLanes: DmvLane[];
+  // Broad Educational's angle bank — what replaced its drafter (lib/angleBank.ts).
+  angleBank: AngleBank;
 }
 
+export type { DmvLane, DmvLaneId } from "./dmvLanes.ts";
+export type { AngleBank, EducationAngle } from "./angleBank.ts";
 export type { DocShelfRow, HomepagePenalty } from "./docs.ts";
 export type { CurriculumRow, CurriculumMeta, CurriculumShelf } from "./curriculum.ts";
 export type { VideoShelfRow } from "./videos.ts";
@@ -729,9 +738,50 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   `;
   const baselineByTemplate = new Map(baselineRows.map((r) => [r.template, r.baselineImpr]));
 
-  // Feedback signal: how posts this pillar produced FROM a recommendation have
-  // actually performed vs its baseline. This is what makes the engine recursive.
-  const recDriven = await getRecDrivenPerf();
+  // ------------------------------------------------------------------------
+  // The two feedback signals the score rides on.
+  //
+  // Both replace the old rec-driven one (Migration 016). That signal only
+  // existed for pillars where an operator had pressed "Mark as used" at least
+  // twice, which in practice meant almost none of them.
+  //
+  //   articleCoverage — when each of our pieces was last put in front of the
+  //     audience, by ANY pillar. Drives the pairing discount.
+  //   trends          — each pillar's last 5 posts against the 5 before them.
+  // ------------------------------------------------------------------------
+  const [articleCoverage, trends, dmvLanes] = await Promise.all([
+    getArticleCoverage(sql),
+    getTemplateTrends(sql, filter),
+    getDmvLanes(sql, filter),
+  ]);
+  // The coldest of the three data lanes, if any is past its own cadence. Read
+  // before scoring because it OVERRIDES the pillar clock — see coldestLane().
+  const dmvCold = coldestLane(dmvLanes);
+  const trendByTemplate = new Map(trends.map((t) => [t.template, t]));
+
+  // Which of our articles each pillar would DRAFT FROM. Keyed on articles.kind
+  // rather than on the template of posts already filed there: kind is a property
+  // of the piece, so a misclassified post can't move a piece onto the wrong
+  // pillar's shelf. Read here (not from the article shelves further down) because
+  // those load after the recommendations are assembled.
+  const pairableRows = await sql<{ id: number; kind: string; chain: string | null; title: string }>`
+    SELECT id::int AS id, kind, chain, title FROM articles
+  `;
+  const KIND_TO_TEMPLATE: Record<string, Template> = {
+    chain_integration: "integration_announcement",
+    product: "product_post",
+    thought_leadership: "thought_leadership",
+  };
+  const pairablesByTemplate = new Map<Template, PairableTarget[]>();
+  for (const a of pairableRows) {
+    const tpl = KIND_TO_TEMPLATE[a.kind];
+    if (!tpl) continue;
+    const list = pairablesByTemplate.get(tpl) ?? [];
+    // Chain pieces are named by their chain — that is how they appear on the
+    // card and how the operator thinks about them ("Robinhood", not the title).
+    list.push({ label: a.chain ? chainLabel(a.chain) : a.title, articleId: Number(a.id) });
+    pairablesByTemplate.set(tpl, list);
+  }
 
   // Rank baseline impressions across pillars → each pillar's performance
   // percentile (0..1). A pillar with no clean baseline gets null (neutral).
@@ -745,29 +795,44 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   const recommendations: Recommendation[] = overview
     .filter((t) => t.template !== "other")
     .map((t) => {
-      const readiness = readinessOf(t.daysSince, t.staleDays);
+      // A LANE pillar is clocked on its coldest lane, not on its own last post.
+      // Data Motion Visual posted yesterday and had gone 35 days without a
+      // market-wide visual; scored on the aggregate it read "fresh", scored 0
+      // and dropped off the board with the gap still hidden. The lane split only
+      // pays for itself if the score can see it.
+      const isLanePillar = TEMPLATE_BY_ID[t.template].draftMode === "dmv";
+      const laneOverride = isLanePillar ? dmvCold : null;
+      const clockDays = laneOverride ? laneOverride.lane.daysSince : t.daysSince;
+      const clockStale = laneOverride ? laneOverride.staleDays : t.staleDays;
+
+      const readiness = readinessOf(clockDays, clockStale);
       const baselineImpr = baselineByTemplate.get(t.template) ?? null;
       // "Discounted" = the displayed median is materially above the clean
       // baseline, i.e. amplified/launch posts were inflating it.
       const discounted = baselineImpr != null && t.medianImpr != null && t.medianImpr > baselineImpr * 1.15;
       const { score, reasons } = scoreParts({
         readiness,
-        daysSince: t.daysSince,
-        staleDays: t.staleDays,
+        daysSince: clockDays,
+        staleDays: clockStale,
         perfPct: perfPctOf(baselineImpr),
         baselineImpr,
         discounted,
       });
+      if (laneOverride) {
+        // Say which lane put it here, or "overdue by 21d" reads as a lie against
+        // a pillar whose own last post was yesterday.
+        reasons.unshift(
+          `Clocked on its coldest lane — ${laneOverride.lane.label} (` +
+            `${laneOverride.lane.daysSince == null ? "never posted" : `${laneOverride.lane.daysSince}d, ${laneOverride.staleDays}d cadence`})` +
+            `, though the pillar itself posted ${agoText(t.daysSince)}`,
+        );
+      }
+      if (isLanePillar && score > 0) reasons.push(...dmvLaneReasons(dmvLanes));
 
       // A chain pillar's staleness is about the FORMAT, not the subject. When
       // its chains have already been covered by other pillars, say so on the
       // card and name the ones that are actually cold — otherwise "27d stale"
       // reads as "nobody has heard about TRON in a month", which isn't true.
-      //
-      // Deliberately NOT folded into the score: we still haven't announced a new
-      // chain, and that gap is real. This makes the card honest about what the
-      // gap is, and leaves the number alone so score_at_use stays comparable
-      // against every use already logged.
       const chainAngles = anglesByTemplate.get(t.template) ?? [];
       if (score > 0 && TEMPLATE_BY_ID[t.template].draftMode === "chains" && chainAngles.length > 0) {
         const warm = chainAngles.filter((c) => c.readiness === "fresh" && c.coveredElsewhere);
@@ -786,20 +851,37 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         );
       }
 
-      // Recursive adjustment: once a pillar has ≥2 rec-driven posts, nudge its
-      // score by how those posts did vs baseline. Underperformers cool off;
-      // over-performers get a small boost. Only applied to a live (non-zero)
-      // score so resting pillars stay resting.
-      const rd = recDriven.get(t.template);
+      // ------------------------------------------------------------------
+      // Two adjustments, both of which used to be deliberately absent.
+      //
+      // PAIRING. The chain-coverage note above was a reason string and nothing
+      // more, on the reasoning that the standalone announcement is still owed
+      // and score_at_use had to stay comparable against logged uses. The first
+      // half is still true and is why this is a discount rather than a mute.
+      // The second half stopped applying when recommendation_uses was retired
+      // (Migration 016), so the number is now free to tell the truth: a pillar
+      // whose own source pieces have just been run elsewhere is not the most
+      // urgent thing on the board. Keyed on the shared ARTICLE, not the shared
+      // chain — see lib/articleCoverage.ts for why that distinction matters.
+      //
+      // TREND. Replaces the rec-driven adjustment, which needed a button
+      // pressed and so measured logging diligence more than performance.
+      // ------------------------------------------------------------------
       let adjScore = score;
-      if (score > 0 && rd && rd.matchedCount >= 2 && rd.vsBaseline != null) {
-        if (rd.vsBaseline < 0.8) {
-          adjScore = Math.max(1, Math.round(score * 0.85));
-          reasons.push(`Cooled — recent posts you ran from this averaged below its baseline`);
-        } else if (rd.vsBaseline > 1.2) {
-          adjScore = Math.min(100, Math.round(score * 1.1));
-          reasons.push(`Boosted — posts you ran from this beat its baseline`);
+
+      if (score > 0) {
+        const pairing = pairingVerdict(t.template, pairablesByTemplate.get(t.template) ?? [], articleCoverage);
+        if (pairing.multiplier !== 1) {
+          adjScore = Math.max(1, Math.round(adjScore * pairing.multiplier));
+          if (pairing.reason) reasons.push(pairing.reason);
         }
+      }
+
+      const tr = trendByTemplate.get(t.template);
+      if (score > 0) {
+        const verdict = trendVerdict(tr);
+        if (verdict.multiplier !== 1) adjScore = Math.min(100, Math.max(1, Math.round(adjScore * verdict.multiplier)));
+        if (verdict.reason) reasons.push(verdict.reason);
       }
 
       return {
@@ -809,8 +891,8 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         scoreReasons: reasons,
         baselineImpr,
         discounted,
-        recDrivenCount: rd?.matchedCount ?? 0,
-        recDrivenVsBaseline: rd?.vsBaseline ?? null,
+        trendFlag: tr?.flag ?? "insufficient",
+        trendImprPct: tr?.imprPct ?? null,
         easyWin: EASY_WIN_TEMPLATES.has(t.template),
         chains: chainAngles,
         products: productsByTemplate.get(t.template) ?? [],
@@ -953,11 +1035,12 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   // The two registry-first shelves. Read unconditionally rather than only when
   // their pillar is on screen: both are small, and the Prioritize page renders
   // every pillar's card at once.
-  const [docPages, homepagePenalty, videos, curriculum] = await Promise.all([
+  const [docPages, homepagePenalty, videos, curriculum, angleBank] = await Promise.all([
     getDocShelf(),
     getHomepagePenalty(),
     getVideoShelf(),
     getCurriculumShelf(),
+    getAngleBank(sql),
   ]);
 
   return {
@@ -970,6 +1053,8 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     homepagePenalty,
     videos,
     curriculum,
+    dmvLanes,
+    angleBank,
   };
 }
 

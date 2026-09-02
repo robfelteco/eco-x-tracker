@@ -205,6 +205,11 @@ export interface XPost {
   // X native Article) its cover image. The quoting post rarely repeats it, so we
   // pull it from the referenced-tweet expansion and use it as the thumbnail.
   quoted_image_url: string | null;
+  // The id of the tweet being quoted. Persisted (Migration 015) because it is
+  // the ONLY place the reference appears: a quote post's entities.urls carries
+  // its own media URL and nothing else, so the article-attribution ladder had no
+  // way to see that a data-motion visual was quote-posting a chain article.
+  quoted_post_id: string | null;
   // public_metrics returned inline with the timeline — used as the first
   // snapshot so we don't pay to re-read a post we just fetched.
   metrics: PublicMetrics;
@@ -416,6 +421,7 @@ function mapRawToPost(
     link_description,
     link_image_url,
     quoted_image_url,
+    quoted_post_id: quotedRef?.id ?? null,
     metrics: {
       id: t.id,
       impressions: t.public_metrics?.impression_count ?? 0,
@@ -602,4 +608,25 @@ export async function fetchArticleCard(tweetId: string): Promise<ArticleCard | n
   } catch {
     return null;
   }
+}
+
+/**
+ * The quoted-tweet id for up to 100 posts, read from referenced_tweets.
+ *
+ * A backfill helper for Migration 015. Going forward ingest persists this from
+ * the timeline fetch for free; the ~96 quote posts already on file predate the
+ * column, and re-running a full timeline backfill to recover one field would
+ * cost 3,200 reads instead of one per post that actually needs it.
+ */
+export async function fetchQuotedRefs(ids: string[]): Promise<{ id: string; quoted_post_id: string | null }[]> {
+  if (!ids.length) return [];
+  const data = await apiGet<{ data?: RawTweet[] }>("/tweets", {
+    ids: ids.slice(0, 100).join(","),
+    "tweet.fields": "referenced_tweets",
+  });
+  addBilled((data.data || []).length);
+  return (data.data || []).map((t) => ({
+    id: t.id,
+    quoted_post_id: (t.referenced_tweets ?? []).find((r) => r.type === "quoted")?.id ?? null,
+  }));
 }

@@ -65,6 +65,7 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         media_type, media_urls, preview_image_url,
         is_reply, is_self_reply, is_quote,
         link_title, link_description, link_image_url, quoted_image_url,
+        quoted_post_id,
         chains, entities, products, shape, analog_id,
         enriched_at, updated_at
       ) VALUES (
@@ -73,6 +74,7 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         ${p.mediaType}, ${JSON.stringify(p.media_urls)}, ${p.preview_image_url},
         ${p.is_reply}, ${p.is_self_reply}, ${p.is_quote},
         ${p.link_title}, ${p.link_description}, ${p.link_image_url}, ${p.quoted_image_url},
+        ${p.quoted_post_id},
         ${dim.chains}, ${dim.entities}, ${dim.products}, ${dim.shape}, ${analogId},
         ${hasArticle ? new Date().toISOString() : null}, now()
       )
@@ -97,6 +99,7 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
         link_description = COALESCE(EXCLUDED.link_description, posts.link_description),
         link_image_url = COALESCE(EXCLUDED.link_image_url, posts.link_image_url),
         quoted_image_url = COALESCE(EXCLUDED.quoted_image_url, posts.quoted_image_url),
+        quoted_post_id = COALESCE(EXCLUDED.quoted_post_id, posts.quoted_post_id),
         enriched_at = COALESCE(EXCLUDED.enriched_at, posts.enriched_at),
         updated_at = now()
       RETURNING (xmax = 0) AS inserted
