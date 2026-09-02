@@ -220,6 +220,63 @@ model reaches for when it has two examples and a rhythm to fill.
 
 ---
 
+## Tier 5: the commodity zone
+
+The only tier here that is about **positioning** rather than prose. Source: Ryne,
+all hands 2026-08-31, on top-line messaging, plus the commodity-zone list already
+carried in `lib/positioning.ts`.
+
+It exists because the positioning brief *asked* for these and nothing *checked*
+for them. Every other rule in this file is enforced in code rather than requested
+in a prompt, and the words the CEO spends the most time on were the one
+exception. A draft could clear the entire gauntlet still saying "for agents".
+
+**Every finding in this tier is soft.** Hard findings force a repair round-trip
+and can drop an option; these are context judgments the operator should make. A
+curriculum post teaching correspondent banking may say "money movement" about the
+*tradfi* system and be right to. What Ryne objects to is the phrase as **Eco's
+self-description**, and a regex cannot tell those apart. So it flags and defers.
+
+### Crowded or meaningless
+
+Flagged on sight: "for agents", "agent-ready", "money movement", "move money",
+"moves money", "moving money", "the future of payments", "payment rails for the
+internet", "makes money programmable", "stablecoin network", and the superseded
+self-description "the neutral platform organizing the stablecoin market".
+
+On "for agents" specifically: over the last twelve months, most of the market
+appended those two words to an existing product description, which is why it now
+reads as disingenuous. Agent-native orientation is signalled by what the product
+does, never by the phrase.
+
+### Substantiation-gated
+
+"programmable", "programmability", "trusted" and "control" sit in the hollow
+column and the ownable column **at the same time**. The only thing separating
+them is whether the post says what they mean. Ryne on making this mistake
+himself: you cannot say programmable and trust that people understand the
+implications.
+
+So these are not banned, they are gated. A gated word passes when the sentence
+carrying it also carries a number or a named mechanism (a rule, a parameter, a
+deadline, slippage, a route, a solver, an intent, settlement, atomicity, a
+signature, an endpoint). It flags when the sentence carries neither.
+
+The gate has one documented exception. "A trusted party controls execution" is
+the critique we make *of the alternatives*, not a claim about Eco, so
+`trusted party / third party / intermediary / setup / execution / counterparty`
+and friends do not flag. That exception came from the live corpus, where without
+it one of the better product posts flagged and the finding was simply wrong.
+
+### What this measured
+
+Run across 329 posts in the corpus, this tier flags 15.2%. The largest single
+bucket is bare "programmable" (22). The clearest true positive in the set is a
+video post reading "Move Money Smarter / ... make money movement more programmable
+than ever before", which lands in three of the avoid columns in one breath.
+
+---
+
 ## Length policy
 
 Threads are banned, so length is the only structural variable left, and the mix is
@@ -326,6 +383,8 @@ flag; no repair round-trip is spent on it.
 2. Zero em dashes, zero markdown, zero structural emoji?
 3. Zero banned words and phrases?
 4. At most one Tier 2 register word, doing real work?
+4b. Nothing from the commodity zone, and does every "programmable" / "control" /
+    "trusted" carry its substantiation in the same sentence?
 5. Would the opening line survive being moved to a competitor's account? If yes,
    it is filler.
 6. Is there a number, a named system, or a dated fact in the first three lines?

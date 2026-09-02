@@ -206,6 +206,80 @@ const PATTERNS: PatternRule[] = [
 const HEDGE_BUDGET = 2;
 
 // ---------------------------------------------------------------------------
+// Tier 5, the commodity zone. This tier is about POSITIONING words, not prose
+// style, and it is the only tier here sourced from lib/positioning.ts rather
+// than from the slop research. It is numbered 5 because Tier 4 in ANTI-SLOP.md
+// is rhythm and shape, which is prose guidance and has no regex.
+//
+// It exists because the positioning brief ASKED for these and nothing CHECKED
+// for them. Every other rule Rob cared about is enforced in code, not left as a
+// request in a prompt: em dashes are stripped, threads are caught, sources are
+// gated. The words Ryne spends the most time on were the one exception, so a
+// draft could clear the whole gauntlet still carrying "for agents".
+//
+// Source: Ryne, all hands 2026-08-31, on top-line messaging ("every single word
+// matters"), plus the commodity-zone list already in POSITIONING_BRIEF.
+//
+// ALL SOFT, deliberately. Hard findings force a repair round trip and can drop
+// an option; these are context judgments the operator should make. A curriculum
+// post teaching correspondent banking may say "money movement" about the TRADFI
+// system and be right to. What Ryne objects to is the phrase as ECO's
+// self-description. A regex cannot tell those apart, so it flags and defers.
+// ---------------------------------------------------------------------------
+
+const COMMODITY_PHRASES = [
+  // "It's shocking how many people had their existing product description and
+  // then just literally added two words at the end of it." We signal agent-native
+  // orientation through what the product does, never through the phrase.
+  // "for agents" alone also catches "built for agents" / "designed for agents",
+  // so the longer variants would only double-report the same sentence.
+  "for agents", "agent-ready",
+  // Unqualified, and therefore not distinctive.
+  "money movement", "move money", "moves money", "moving money",
+  "the future of payments", "payment rails for the internet",
+  "makes money programmable",
+  // Worn-out category labels, including the superseded self-description that
+  // was still live in three prompt files until 2026-09-01.
+  "stablecoin network",
+  "the neutral platform organizing the stablecoin market",
+];
+
+// The words that sit in the hollow column and the ownable column at the same
+// time. Ryne: "you can't just say programmable and trust that people understand
+// the implications of that" -- and he notes he made that mistake himself this
+// year. So these are not banned, they are GATED: legitimate when the same
+// sentence shows the mechanism, empty when it does not.
+const SUBSTANTIATION_GATED = [
+  "programmable", "programmability", "trusted", "control",
+];
+
+// Senses of a gated word that are not the claim Ryne objects to. "Trusted" as a
+// self-description is hollow; "a trusted party controls execution" is the
+// technical critique we make OF the alternatives, and one of our better product
+// posts opens on exactly that line. Measured against the live corpus: without
+// this, that post flags and the finding is simply wrong.
+const GATED_EXCEPTIONS: Record<string, RegExp> = {
+  trusted:
+    /\btrusted\s+(party|parties|third[- ]party|intermediary|intermediaries|setup|execution|environment|counterparty|entity|custodian|relayer|oracle)\b/i,
+};
+
+// What counts as substantiation, checked inside the same sentence. Crude on
+// purpose, in the same spirit as the rest of the regex tiers: it catches the
+// bare assertion, and anything fuzzier is left to the model and the operator.
+// A number is the strongest signal; a named mechanism is the other honest one.
+const SUBSTANTIATION_RE =
+  /\d|\b(rule|rules|ruleset|rulesets|parameter|parameters|policy|deadline|slippage|route|routes|routing|solver|solvers|intent|intents|settle|settles|settled|settlement|atomic|atomically|revert|reverts|signature|allowance|permit|endpoint|API|call|calls|quote|quotes|mint|redemption|custody|counterparty)\b/i;
+
+// Sentence split for the gated check. Handles the newline-separated lines an X
+// post is actually built from, not just full stops.
+function sentencesOf(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
 // Form. The rules Rob named directly: one post, never a thread, no em dashes.
 // ---------------------------------------------------------------------------
 
@@ -386,6 +460,39 @@ export function scanSlop(text: string): SlopFinding[] {
     if (!hits.length) continue;
     if (p.rule === "hedge-pileup" && hits.length <= HEDGE_BUDGET) continue;
     push(out, { rule: p.rule, severity: p.severity, match: (hits[0] ?? "").trim().slice(0, 60), fix: p.fix });
+  }
+
+  // --- Tier 5 commodity zone ---
+  for (const w of COMMODITY_PHRASES) {
+    const m = text.match(wordRe(w));
+    if (m) {
+      push(out, {
+        rule: "commodity-zone",
+        severity: "soft",
+        match: m[0],
+        fix: `"${m[0]}" is in the crowded/meaningless column (Ryne, all hands 2026-08-31). It is not distinctive on its own. Say the specific thing Eco does instead, or qualify it in the same sentence.`,
+      });
+    }
+  }
+
+  for (const w of SUBSTANTIATION_GATED) {
+    // wordRe is global, so lastIndex would persist across .test() calls.
+    const probe = new RegExp(wordRe(w).source, "i");
+    const except = GATED_EXCEPTIONS[w];
+    const bare = sentencesOf(text).find(
+      (sent) =>
+        probe.test(sent) &&
+        !SUBSTANTIATION_RE.test(sent) &&
+        !(except && except.test(sent)),
+    );
+    if (bare) {
+      push(out, {
+        rule: "unsubstantiated",
+        severity: "soft",
+        match: w,
+        fix: `"${w}" is hollow unqualified and ownable when explained. This sentence carries neither a number nor a named mechanism: "${bare.slice(0, 80)}". Show what makes it true in the same sentence, or cut the word.`,
+      });
+    }
   }
 
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "hard" ? -1 : 1));
