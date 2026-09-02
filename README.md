@@ -204,3 +204,160 @@ overrun is systematic, then clamps to the real duration.
 lane (historical depth comes from paginating roster timelines with a persisted
 `since_id`). YouTube and published reports carry the historical recall. The UI
 shows per-lane status rather than one undifferentiated list so this is visible.
+
+## The channel lane (Lane 1 podcast sourcing)
+
+Three YouTube channels feed the analog curriculum: **Money Code**
+(`@moneycodepod`), **Tokenized** (`@TokenizedPodcast`) and **What's Next with
+Philip Meissner** (`@WhatsNextwithPhilipMeissner`). See Migration 012,
+`lib/channels.ts`, `lib/channelSweep.ts`, `lib/channelSources.ts` and
+`lib/channelTranscribe.ts`.
+
+### Why it is a separate lane and not three new hubs
+
+`lib/analogSweep.ts` is **concept-first**: `pickConceptsToSweep()` rotates four
+concepts and, for each, builds two queries and maps that concept's institutional
+hubs. You cannot cheaply ask "what did Tokenized say about nostro accounts" — you
+enumerate what the channel published and then decide which concept it serves. The
+lane is inverted, so it gets its own ledger. (It is also why these are not
+`AnalogDef.hubs` entries: `SKIP_HOST` excludes `youtube.com` deliberately, and
+scraping a watch page returns markup.)
+
+### The cost ladder
+
+Only the last rung costs real money; the first three exist to reach it rarely.
+
+| Rung | Cost | What it does |
+|---|---|---|
+| list | 3 YouTube quota units per channel | Uploads playlist, not `search.list` (which is 100) |
+| triage | one batched Claude call | title + description + chapters → concepts, windows, description facts |
+| describe | free | a `current` source row with `facts_source='description'` |
+| transcribe | Gemini | only the flagged chapter windows, or a whole clip |
+
+Measured on the first live runs: 40 videos triaged in 6 Claude calls (~38k in /
+~8k out, 9 quota units, 0 Firecrawl credits); 26 description-tier source rows
+across 9 episodes with no transcription at all; and **141 minutes of flagged
+windows against 584 minutes of whole episodes**.
+
+### Podcasts can never be canonical
+
+Enforced in code — `NEVER_CANONICAL` in `lib/analogSweep.ts` forces
+`kind='podcast'` to `tier='current'`, whatever a model decides. Money Code is
+"Presented by Stablecon; Powered by BVNK" and Tokenized is co-hosted by Visa's
+head of crypto. Both are excellent on what happened this month and neither is an
+authority on how CHIPS settles, and `canonical` means "the institution explaining
+its own mechanism, still true in five years". The summary handed to the drafter
+also states the publisher's commercial position, so a practitioner's account of
+their own operations cannot read as a measurement.
+
+This is the layer the institutional lane structurally cannot supply. Measured:
+`canonicalOnly` fell from 10 concepts to 7, concepts with a current source rose
+from 10 to 13, and `correspondent_banking`, `least_cost_routing` and
+`nostro_vostro` now have **no** current source except a podcast.
+
+### Three things the metadata taught us, all measured
+
+**Triage cannot be the vocab matcher.** `detectAnalog()` over 36 recent videos
+matched **3** on titles. The vocabulary is tradfi ("nostro", "prefunding") and
+these channels speak stablecoin-native, so "The Funding Bottleneck Slowing
+Stablecoin Payments" — a textbook `nostro_vostro` episode — matched nothing.
+Adding descriptions reached 14/36 but introduced a worse failure (below). The
+matcher is still run and printed by `scripts/sweep-channels.ts` as a cross-check,
+so the measurement stays visible; it never gates.
+
+**Every long-form episode ships 10-17 timestamped chapters.** A human-written
+topic index, free, and the reason windowed transcription is possible. Parsed
+deterministically by `parseChapters()`, which rejects prose timestamps (a guest
+saying "see 12:30") because treating one as a chapter would send a paid window at
+random.
+
+**Clips inherit their parent episode's entire description, byte-identical.** Five
+Money Code clips and the episode they were cut from all carry the same 2,822
+characters. So the parent key is exact, one triage covers a whole clip family —
+and description-derived facts belong to the **episode only**. Storing "$3B over
+the last 12 months" on all six would put one claim behind six citations and
+inflate every count on a shelf whose only job is honest coverage. A clip
+contributes nothing until it is transcribed.
+
+### One transcript, two consumers
+
+Transcripts land in `raw_documents`, where the quote pipeline already reads, so a
+single Gemini pass produces both curriculum facts (`analog_sources`,
+`facts_source='transcript'`) and quote candidates — the latter through
+`ingestDocQuotes()`, which was lifted out of `runLane()` precisely so the verbatim
+gate has one implementation. The three channels are also in `WATCH_SEED`, so
+whichever lane reaches a video first pays for it.
+
+This also fixed a pre-existing cost bug: the YouTube quote lane transcribed
+*before* checking `raw_documents` and deduped only at INSERT, so with the 365-day
+default lookback the same episodes were re-transcribed every run while newer ones
+were crowded out by the 12-video cap.
+
+### The fabricated-transcript gate on a windowed call
+
+`transcribeVideo()`'s `promptTokenCount` floor still applies, scaled to the window
+(`min(2000, max(400, windowSec * 8))`) rather than left flat — low-resolution
+video runs on the order of a thousand prompt tokens a minute, so a two-minute
+window is still thousands, but a deliberately tiny window must not make the gate
+impossible to pass and turn a real refusal into a false `VideoNotIngestedError`.
+**Gemini uses either clock on a windowed call, so the clock is detected rather
+than assumed.** Observed on a 2812-second episode windowed to 636-829s: it
+returned timestamps in WHOLE-VIDEO time out to ~2800. The whole-video rescale
+then compressed them proportionally into 0..193 and the offset shift added 636,
+producing segments 0.69 and 0.1 seconds long that each carried a full sentence.
+Those land INSIDE the window, so no range check catches them, and a deep link
+built from one points at 646s for a quote spoken near 1900s.
+
+So `transcribeVideo()` branches on which frame the values fall in — clip-relative
+(clamp, then shift), already whole-video (clamp into the window, no shift), or
+neither. Proportional rescale still applies to whole-video passes, where a
+systematic overrun is what it was written for.
+
+**Frame detection alone was not enough.** With every segment correctly inside its
+window, one episode still returned a NEGATIVE duration and a median of 153 words
+per second while another was entirely plausible at 3.7. A per-call frame guess
+cannot rescue output whose segments disagree with each other, so the timing has
+its own gate on the one property checkable without the audio: speech rate.
+Natural speech is 2-3 words a second; if more than a third of a window's segments
+fall outside 0.4-8 wps, or run negative, or exceed 240s, the whole window's timing
+is discarded and every segment anchors to the window start.
+
+**Deep links were reaching `&t=0` regardless, and that was a latent bug in the
+quote pipeline.** `segmentsToBody()` renders a transcript as "Speaker: text" lines
+with no timestamps in them, and Pass 2 extracts quotes from that text — so
+`RawCandidate.start_sec` had nothing to derive from and came back 0 on every
+YouTube quote the app has ever produced. All the rescaling and clamping in
+`transcribeVideo()` existed to make the link land correctly and was never reaching
+it. `segmentStartForQuote()` in `lib/quoteVerify.ts` recovers it with no prompt
+change and no extra model call: the verbatim gate has already proved the quote is
+in the body, so the segment carrying it is found the same way and its `start_sec`
+used. It returns null rather than guessing, which leaves the plain video URL.
+
+**So a windowed pass gives chapter-level link precision, not moment-level.** That
+is the honest description of the feature. The window was chosen because its
+published chapter label named the mechanism, so its start is where a human
+skimming the chapter list would land anyway — and this codebase's rule is that a
+null is free while a wrong deep link is worse than none. The TEXT is unaffected:
+facts and quotes are extracted from it and the verbatim gate checks against the
+same text, so correctness never depended on the timestamps.
+
+### Operations
+
+```bash
+node --env-file=.env scripts/sweep-channels.ts --dry-run     # writes nothing
+node --env-file=.env scripts/sweep-channels.ts               # ledger only
+node --env-file=.env scripts/sweep-channels.ts --sources     # + description tier
+node --env-file=.env scripts/sweep-channels.ts --transcribe --limit 3
+```
+
+`--transcribe` is the only flag that spends real money, so it is never implied.
+Two crons, on separate clocks for the same reason `/api/sweep` is split from
+`/api/sync` — a step that always gets cut is a step that does not exist:
+
+| Route | Schedule | Cost |
+|---|---|---|
+| `/api/channels` | 08:00 | list + triage + description tier |
+| `/api/channels/transcribe` | 08:30 | Gemini, 4 videos a run |
+
+A fabricated-transcript abort returns **500**, not a thin 200 — it must not read
+as a quiet day.

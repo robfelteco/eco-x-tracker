@@ -308,7 +308,7 @@ Return ONLY a JSON object, no prose, no code fences:
   try {
     const obj = JSON.parse(t.slice(a, z + 1));
     const list = Array.isArray(obj?.docs) ? obj.docs : [];
-    const KINDS = ["article", "report", "video", "primer", "standard", "regulation"];
+    const KINDS = ["article", "report", "video", "primer", "standard", "regulation", "podcast"];
     return list.map((d: Record<string, unknown>) => ({
       url: String(d.url ?? "").trim(),
       keep: d.keep === true,
@@ -330,17 +330,51 @@ Return ONLY a JSON object, no prose, no code fences:
 // Storage
 // ---------------------------------------------------------------------------
 
-async function store(analogId: string, e: Extracted, factsSource: string): Promise<void> {
+/**
+ * A source row, as much of one as any producer needs to supply. Exported so the
+ * channel lane (lib/channelSources.ts) writes through the SAME statement rather
+ * than a second INSERT that would drift from this one.
+ */
+export interface StorableSource {
+  url: string;
+  tier: "canonical" | "current";
+  title: string;
+  publisher: string;
+  publishedOn: string;
+  kind: string;
+  summary: string;
+  keyFacts: string[];
+}
+
+// Kinds that can never be canonical, however a model tiers them.
+//
+// A podcast is the reason this exists. Money Code is "Presented by Stablecon;
+// Powered by BVNK" and Tokenized is co-hosted by Visa's head of crypto: both are
+// excellent sources of what is happening this month and neither is an authority
+// on how CHIPS settles. `canonical` means "the institution explaining its own
+// mechanism, still true in five years", and a sponsored interview cannot be
+// that. Enforced here instead of asked for in a prompt, because a prompt drifts
+// and the credibility cost of a sponsored episode cited as a mechanism authority
+// is exactly what analog_sources exists to prevent.
+const NEVER_CANONICAL = new Set(["podcast"]);
+
+export async function storeAnalogSource(
+  analogId: string,
+  e: StorableSource,
+  factsSource: string,
+  sourceOf = "sweep",
+): Promise<void> {
+  const tier = NEVER_CANONICAL.has(e.kind) ? "current" : e.tier;
   // Canonical never expires. Current ages out of the "current" read after the
   // retention window but stays in the table, so we keep the history.
   const expires =
-    e.tier === "current" ? new Date(Date.now() + CURRENT_RETENTION_DAYS * 86_400_000).toISOString() : null;
+    tier === "current" ? new Date(Date.now() + CURRENT_RETENTION_DAYS * 86_400_000).toISOString() : null;
   await sql`
     INSERT INTO analog_sources (analog_id, title, publisher, url, kind, published_on, summary, key_facts,
                                 verified, http_status, checked_at, source_of, tier, expires_at, facts_source)
     VALUES (${analogId}, ${e.title}, ${e.publisher || null}, ${e.url}, ${e.kind},
             ${e.publishedOn || null}, ${e.summary || null}, ${e.keyFacts},
-            true, 200, now(), 'sweep', ${e.tier}, ${expires}, ${factsSource})
+            true, 200, now(), ${sourceOf}, ${tier}, ${expires}, ${factsSource})
     ON CONFLICT (analog_id, url) DO UPDATE SET
       title = EXCLUDED.title,
       publisher = COALESCE(EXCLUDED.publisher, analog_sources.publisher),
@@ -351,6 +385,25 @@ async function store(analogId: string, e: Extracted, factsSource: string): Promi
       -- Never demote a hand-vetted seed to a swept row.
       tier = CASE WHEN analog_sources.source_of = 'seed' THEN analog_sources.tier ELSE EXCLUDED.tier END,
       expires_at = CASE WHEN analog_sources.source_of = 'seed' THEN analog_sources.expires_at ELSE EXCLUDED.expires_at END,
+      -- Provenance can be UPGRADED but never downgraded.
+      --
+      -- The channel lane made this necessary and the first run showed why. A
+      -- video is filed at description tier first, then transcribed, and both
+      -- write the same (analog_id, url) — so the transcript pass lands here.
+      -- facts_source was missing from this list, so key_facts and summary were
+      -- replaced with transcript-derived ones while facts_source stayed
+      -- 'description'. The row then told the drafter "facts come from the
+      -- description, do not attribute a spoken number to anyone" about facts
+      -- lifted from a transcript, and its own summary said the opposite.
+      --
+      -- 'body' and 'transcript' both mean we read the actual artifact, so they
+      -- outrank 'description' and a later description-tier pass must not undo
+      -- them.
+      facts_source = CASE
+        WHEN analog_sources.facts_source IN ('body', 'transcript')
+             AND EXCLUDED.facts_source NOT IN ('body', 'transcript')
+        THEN analog_sources.facts_source
+        ELSE EXCLUDED.facts_source END,
       verified = true, checked_at = now(), updated_at = now()
   `;
 }
@@ -521,7 +574,7 @@ export async function sweepConcept(analogId: string, opts: SweepOptions = {}): P
         if (e.reason) warnings.push(`rejected ${hostOf(e.url)}: ${e.reason}`);
         continue;
       }
-      await store(analogId, e, "body");
+      await storeAnalogSource(analogId, e, "body");
       added++;
     }
     for (const e of vidEx) {
@@ -529,7 +582,7 @@ export async function sweepConcept(analogId: string, opts: SweepOptions = {}): P
         rejected++;
         continue;
       }
-      await store(analogId, { ...e, kind: "video" }, "description");
+      await storeAnalogSource(analogId, { ...e, kind: "video" }, "description");
       added++;
     }
   } catch (err) {

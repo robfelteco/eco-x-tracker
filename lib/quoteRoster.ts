@@ -157,6 +157,14 @@ export const WATCH_SEED: { kind: string; identifier: string; label: string }[] =
   // removes the ambiguity — resolveYouTubeChannel() passes UC… ids straight
   // through.
   { kind: "yt_channel", identifier: "UCip4CIpmM13NOAH-j9GiAzg", label: "Money20/20.tv" },
+  // The three channels the curriculum lane watches (lib/channels.ts). Seeded
+  // here too so the QUOTE lane lists them as well: one transcript in
+  // raw_documents serves both consumers, and whichever lane reaches a video
+  // first pays for it. Pinned as channelIds for the same reason Money20/20 is —
+  // a handle can be changed by its owner.
+  { kind: "yt_channel", identifier: "UC03s4ohGxrFSMHxGR8DMzZg", label: "Money Code" },
+  { kind: "yt_channel", identifier: "UC8SaXHFAqVHUjE2OLUFakjw", label: "Tokenized" },
+  { kind: "yt_channel", identifier: "UCoX2V7454TPPAhWu172lGGQ", label: "What's Next with Philip Meissner" },
   { kind: "report_site", identifier: "usa.visa.com/solutions/crypto", label: "Visa Onchain Analytics" },
   { kind: "report_site", identifier: "citigroup.com/global/insights", label: "Citi GPS" },
   { kind: "report_site", identifier: "bis.org/publ", label: "BIS publications" },

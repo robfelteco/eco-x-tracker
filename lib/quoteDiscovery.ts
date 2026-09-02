@@ -5,7 +5,7 @@ import {
   webDeepLink, youtubeDeepLink, type LaneDoc,
 } from "./quoteLanes.ts";
 import { extractQuotes } from "./quoteExtract.ts";
-import { verifyQuote, surroundingContext, quoteHash } from "./quoteVerify.ts";
+import { verifyQuote, surroundingContext, quoteHash, segmentStartForQuote } from "./quoteVerify.ts";
 import { scoreCandidate } from "./quoteScore.ts";
 import {
   LANES, DEFAULT_LANE_MS, RUN_STALE_MS, LANE_FETCH_DEADLINE_MS, LANE_HARD_DEADLINE_MS,
@@ -268,9 +268,26 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
         .slice(0, 12);
       const skipped = videos.length - usable.length;
       if (skipped > 0) warnings.push(`skipped ${skipped} video(s) outside the 4min-2hr window (Shorts / very long streams)`);
-      await report("transcribe", 0, usable.length);
+      // Skip anything already transcribed. The lane used to transcribe FIRST and
+      // dedupe only at INSERT, so with the 365-day default lookback the same
+      // episodes were re-transcribed every run while newer ones were crowded out
+      // by the 12-video cap. The transcript is in raw_documents either way, so
+      // nothing is lost by not paying for it twice.
+      const seenIds = new Set(
+        (
+          await sql<{ externalId: string }>`
+            SELECT external_id AS "externalId" FROM raw_documents
+            WHERE source_kind = 'youtube' AND external_id = ANY(${usable.map((v) => v.videoId)})
+          `
+        ).map((r) => r.externalId),
+      );
+      const toTranscribe = usable.filter((v) => !seenIds.has(v.videoId));
+      if (seenIds.size) {
+        warnings.push(`reused ${seenIds.size} transcript(s) already in raw_documents`);
+      }
+      await report("transcribe", 0, toTranscribe.length);
       const res = await runLaneYouTube(
-        usable,
+        toTranscribe,
         (done, total, note) => report("transcribe", done, total, note),
         fetchDeadline,
       );
@@ -338,87 +355,17 @@ export async function runLane(runId: number, lane: Lane): Promise<LaneOutcome> {
       break;
     }
     await report("extract", extracted++, docs.length, d.title ?? d.sourceUrl);
-    const docRows = await sql<{ id: number }>`
-      INSERT INTO raw_documents (run_id, source_kind, source_url, external_id, published_at, title, body, segments)
-      VALUES (${runId}, ${d.sourceKind}, ${d.sourceUrl}, ${d.externalId},
-              ${d.publishedAt}, ${d.title}, ${d.body}, ${d.segments ? JSON.stringify(d.segments) : null}::jsonb)
-      ON CONFLICT (source_kind, external_id) DO UPDATE SET run_id = EXCLUDED.run_id
-      RETURNING id`;
-    const docId = Number(docRows[0].id);
-
     try {
-      const raw = await extractQuotes(d.body, {
-        title: d.title,
-        sourceKind: d.sourceKind,
-        knownSpeakers: d.knownSpeakers,
+      const got = await ingestDocQuotes(d, {
+        runId,
+        byName,
+        competitorNames,
+        perSpeaker,
+        lookbackDays: run.lookbackDays,
+        maxPerSpeaker: MAX_PER_SPEAKER,
       });
-      for (const c of raw) {
-        if (!c.speaker_name) continue; // never queue an unattributed quote
-
-        const speakerKey = c.speaker_name.toLowerCase();
-        if ((perSpeaker.get(speakerKey) ?? 0) >= MAX_PER_SPEAKER) continue;
-
-        // --- The gate. Nothing past here without a verbatim match. ---
-        const v = verifyQuote(c.quote_text, d.body);
-        if (v.verification === "failed") {
-          verifyFailed++;
-          continue;
-        }
-
-        const person = byName.get(c.speaker_name.toLowerCase()) ?? null;
-        const ctx = surroundingContext(c.quote_text, d.body);
-        const deepLink =
-          d.sourceKind === "youtube"
-            ? youtubeDeepLink(d.sourceUrl, c.start_sec)
-            : d.sourceKind === "x_post"
-              ? d.sourceUrl
-              : webDeepLink(d.sourceUrl, c.quote_text);
-
-        // Resolve the org even when the SPEAKER isn't on the roster. Credibility
-        // still caps at the unrostered floor (spec §10), but the reviewer sees a
-        // real tier badge instead of "unrostered", which is what makes the
-        // "add speaker to roster" action worth taking.
-        const org = person?.orgId
-          ? { id: person.orgId, tier: person.orgTier }
-          : await lookupOrgByName(c.org_as_stated);
-        const orgTier = org?.tier ?? null;
-        const scored = scoreCandidate({
-          person,
-          orgTier,
-          isCompetitor: person?.isCompetitor ?? false,
-          saidAt: d.publishedAt,
-          lookbackDays: run.lookbackDays,
-          wordCount: c.quote_text.trim().split(/\s+/).length,
-          selfContained: c.self_contained,
-          singleClaim: c.single_claim,
-          pillarTag: c.pillar_tag,
-          verification: v.verification,
-          quoteText: c.quote_text,
-          competitorNames,
-        });
-
-        // ON CONFLICT DO NOTHING against the quote_hash unique index: a quote
-        // already reviewed — approved OR rejected — never resurfaces.
-        const ins = await sql<{ id: number }>`
-          INSERT INTO quote_candidates (
-            run_id, raw_document_id, quote_text, quote_hash, speaker_name, speaker_title,
-            org_name, person_id, org_id, said_at, deep_link, context_before, context_after,
-            topic_tags, verification, score, score_breakdown, pillar_tag, disqualifiers
-          ) VALUES (
-            ${runId}, ${docId}, ${c.quote_text}, ${quoteHash(c.quote_text)}, ${c.speaker_name},
-            ${c.speaker_title_as_stated ?? person?.title ?? null},
-            ${c.org_as_stated ?? person?.orgName ?? null}, ${person?.id ?? null}, ${org?.id ?? null},
-            ${d.publishedAt}, ${deepLink}, ${ctx.before || c.context_before}, ${ctx.after || c.context_after},
-            ${c.topic_tags}, ${v.verification}, ${scored.score},
-            ${JSON.stringify(scored.breakdown)}::jsonb, ${c.pillar_tag}, ${scored.disqualifiers}
-          )
-          ON CONFLICT (quote_hash) DO NOTHING
-          RETURNING id`;
-        if (ins.length) {
-          candidates++;
-          perSpeaker.set(speakerKey, (perSpeaker.get(speakerKey) ?? 0) + 1);
-        }
-      }
+      candidates += got.candidates;
+      verifyFailed += got.verifyFailed;
     } catch (err) {
       warnings.push(`extract ${d.sourceUrl}: ${(err instanceof Error ? err.message : String(err)).slice(0, 140)}`);
     }
@@ -448,6 +395,141 @@ async function lookupOrgByName(name: string | null): Promise<{ id: number; tier:
     WHERE ${n} LIKE '%' || lower(name) || '%'
     ORDER BY length(name) DESC LIMIT 1`;
   return loose.length ? { id: Number(loose[0].id), tier: loose[0].org_tier } : null;
+}
+
+// ---------------------------------------------------------------------------
+// Persist one document and turn it into reviewable candidates.
+//
+// Lifted out of runLane() so the channel lane (lib/channelTranscribe.ts) reaches
+// the review queue through THIS function rather than a second copy. The verbatim
+// gate is the reason: it is the one rule in this pipeline that must never have
+// two implementations, because a paraphrase slipping past it becomes a public
+// quote card attributed to a real person.
+//
+// runId is nullable — raw_documents.run_id and quote_candidates.run_id both allow
+// it — so a caller that is not a discovery run passes null and its candidates
+// land in the same queue with the same scoring.
+// ---------------------------------------------------------------------------
+
+export interface QuoteIngestContext {
+  runId: number | null;
+  byName: Map<string, RosterPerson>;
+  competitorNames: string[];
+  /** Shared across a run so one prolific speaker cannot flood the queue. */
+  perSpeaker: Map<string, number>;
+  lookbackDays: number;
+  maxPerSpeaker?: number;
+}
+
+export interface QuoteIngestResult {
+  docId: number;
+  candidates: number;
+  verifyFailed: number;
+}
+
+export async function ingestDocQuotes(
+  d: LaneDoc,
+  qctx: QuoteIngestContext,
+): Promise<QuoteIngestResult> {
+  const MAX_PER_SPEAKER = qctx.maxPerSpeaker ?? 3;
+  let candidates = 0;
+  let verifyFailed = 0;
+
+  const docRows = await sql<{ id: number }>`
+    INSERT INTO raw_documents (run_id, source_kind, source_url, external_id, published_at, title, body, segments)
+    VALUES (${qctx.runId}, ${d.sourceKind}, ${d.sourceUrl}, ${d.externalId},
+            ${d.publishedAt}, ${d.title}, ${d.body}, ${d.segments ? JSON.stringify(d.segments) : null}::jsonb)
+    ON CONFLICT (source_kind, external_id) DO UPDATE SET run_id = EXCLUDED.run_id
+    RETURNING id`;
+  const docId = Number(docRows[0].id);
+
+  try {
+    const raw = await extractQuotes(d.body, {
+      title: d.title,
+      sourceKind: d.sourceKind,
+      knownSpeakers: d.knownSpeakers,
+    });
+    for (const c of raw) {
+      if (!c.speaker_name) continue; // never queue an unattributed quote
+
+      const speakerKey = c.speaker_name.toLowerCase();
+      if ((qctx.perSpeaker.get(speakerKey) ?? 0) >= MAX_PER_SPEAKER) continue;
+
+      // --- The gate. Nothing past here without a verbatim match. ---
+      const v = verifyQuote(c.quote_text, d.body);
+      if (v.verification === "failed") {
+        verifyFailed++;
+        continue;
+      }
+
+      const person = qctx.byName.get(c.speaker_name.toLowerCase()) ?? null;
+      const ctx = surroundingContext(c.quote_text, d.body);
+      // c.start_sec comes from a text pass over a body with no timestamps in it,
+      // so it is always 0. Recover the real moment from the segments instead.
+      const startSec =
+        d.sourceKind === "youtube" && d.segments?.length
+          ? (segmentStartForQuote(c.quote_text, d.segments) ?? c.start_sec)
+          : c.start_sec;
+      const deepLink =
+        d.sourceKind === "youtube"
+          ? youtubeDeepLink(d.sourceUrl, startSec)
+          : d.sourceKind === "x_post"
+            ? d.sourceUrl
+            : webDeepLink(d.sourceUrl, c.quote_text);
+
+      // Resolve the org even when the SPEAKER isn't on the roster. Credibility
+      // still caps at the unrostered floor (spec §10), but the reviewer sees a
+      // real tier badge instead of "unrostered", which is what makes the
+      // "add speaker to roster" action worth taking.
+      const org = person?.orgId
+        ? { id: person.orgId, tier: person.orgTier }
+        : await lookupOrgByName(c.org_as_stated);
+      const orgTier = org?.tier ?? null;
+      const scored = scoreCandidate({
+        person,
+        orgTier,
+        isCompetitor: person?.isCompetitor ?? false,
+        saidAt: d.publishedAt,
+        lookbackDays: qctx.lookbackDays,
+        wordCount: c.quote_text.trim().split(/\s+/).length,
+        selfContained: c.self_contained,
+        singleClaim: c.single_claim,
+        pillarTag: c.pillar_tag,
+        verification: v.verification,
+        quoteText: c.quote_text,
+        competitorNames: qctx.competitorNames,
+      });
+
+      // ON CONFLICT DO NOTHING against the quote_hash unique index: a quote
+      // already reviewed — approved OR rejected — never resurfaces.
+      const ins = await sql<{ id: number }>`
+        INSERT INTO quote_candidates (
+          run_id, raw_document_id, quote_text, quote_hash, speaker_name, speaker_title,
+          org_name, person_id, org_id, said_at, deep_link, context_before, context_after,
+          topic_tags, verification, score, score_breakdown, pillar_tag, disqualifiers
+        ) VALUES (
+          ${qctx.runId}, ${docId}, ${c.quote_text}, ${quoteHash(c.quote_text)}, ${c.speaker_name},
+          ${c.speaker_title_as_stated ?? person?.title ?? null},
+          ${c.org_as_stated ?? person?.orgName ?? null}, ${person?.id ?? null}, ${org?.id ?? null},
+          ${d.publishedAt}, ${deepLink}, ${ctx.before || c.context_before}, ${ctx.after || c.context_after},
+          ${c.topic_tags}, ${v.verification}, ${scored.score},
+          ${JSON.stringify(scored.breakdown)}::jsonb, ${c.pillar_tag}, ${scored.disqualifiers}
+        )
+        ON CONFLICT (quote_hash) DO NOTHING
+        RETURNING id`;
+      if (ins.length) {
+        candidates++;
+        qctx.perSpeaker.set(speakerKey, (qctx.perSpeaker.get(speakerKey) ?? 0) + 1);
+      }
+    }
+  } catch (err) {
+    // Rethrow: the caller decides whether one bad document is a warning or a
+    // failed lane. The document is already persisted above, so a retry
+    // re-extracts rather than re-fetching.
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+
+  return { docId, candidates, verifyFailed };
 }
 
 // ---------------------------------------------------------------------------

@@ -80,6 +80,10 @@ interface GeminiPart {
   text?: string;
   // eslint-disable-next-line @typescript-eslint/naming-convention
   file_data?: { file_uri: string };
+  // Clip window on a YouTube fileUri, so a 46-minute episode can be read six
+  // minutes at a time. Offsets are strings with a trailing "s" per the API.
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  video_metadata?: { start_offset: string; end_offset: string };
 }
 
 export class VideoNotIngestedError extends Error {
@@ -157,10 +161,29 @@ function parseJson<T>(raw: string, fallback: T): T {
 // poisons the queue, so the expected participants are passed in and the model is
 // told to return null rather than guess. A segment with a null speaker can never
 // produce a candidate.
+/**
+ * Transcribe a whole video, or one window of it.
+ *
+ * The window is what makes the channel lane affordable: these podcasts publish a
+ * 10-17 line chapter index, so the two or three chapters that actually discuss a
+ * mechanism can be read instead of all 46 minutes. Measured on the first live
+ * triage: 141 minutes of windows against 584 minutes of whole episodes.
+ *
+ * TIMESTAMPS COME BACK IN WHOLE-VIDEO TIME. Gemini stamps a clip from the clip's
+ * own zero, so window.startSec is added back on the way out — otherwise every
+ * deep link from a windowed pass would point at the top of the episode, which is
+ * the one thing the link has to get right.
+ */
+export interface ClipWindow {
+  startSec: number;
+  endSec: number;
+}
+
 export async function transcribeVideo(
   youtubeUrl: string,
   expectedParticipants: string[],
   durationSec?: number | null,
+  window?: ClipWindow | null,
 ): Promise<Segment[]> {
   const prompt = [
     "Produce a diarized transcript of this video.",
@@ -176,10 +199,14 @@ export async function transcribeVideo(
     'Return JSON only: [{"speaker_label":"S1","speaker_name":"Full Name or null","start_sec":0,"end_sec":0,"text":"…"}]',
   ].join("\n");
 
-  const reply = await gemini(
-    [{ file_data: { file_uri: youtubeUrl } }, { text: prompt }],
-    { lowRes: true, model: VIDEO_MODEL },
-  );
+  const videoPart: GeminiPart = { file_data: { file_uri: youtubeUrl } };
+  if (window) {
+    videoPart.video_metadata = {
+      start_offset: `${Math.max(0, Math.floor(window.startSec))}s`,
+      end_offset: `${Math.max(1, Math.ceil(window.endSec))}s`,
+    };
+  }
+  const reply = await gemini([videoPart, { text: prompt }], { lowRes: true, model: VIDEO_MODEL });
 
   // ---- The anti-hallucination gate. -------------------------------------
   // A model that cannot actually read the video will still cheerfully return a
@@ -194,7 +221,14 @@ export async function transcribeVideo(
   // check is circular. So the only place to stop it is here, and the signal is
   // the token count. Even a few minutes of low-resolution audio costs thousands
   // of prompt tokens; a couple of hundred means only the text prompt was read.
-  const MIN_PROMPT_TOKENS = 2000;
+  // The floor holds for a windowed call too: low-resolution video runs on the
+  // order of a thousand prompt tokens a minute, so even a two-minute window is
+  // thousands and a couple of hundred still means only the text prompt was read.
+  // It is scaled anyway rather than left flat, so a deliberately tiny window can
+  // never make the gate impossible to pass and turn a real refusal into a false
+  // VideoNotIngestedError.
+  const windowSec = window ? Math.max(1, window.endSec - window.startSec) : null;
+  const MIN_PROMPT_TOKENS = windowSec != null ? Math.min(2000, Math.max(400, windowSec * 8)) : 2000;
   if (reply.promptTokens < MIN_PROMPT_TOKENS) {
     throw new VideoNotIngestedError(
       reply.promptTokens,
@@ -231,6 +265,61 @@ export async function transcribeVideo(
   // after the video finishes, which fails the one thing the reviewer needs the
   // link to do. Rescale proportionally when the overrun is systematic, then
   // clamp, so links land close to the right moment instead of off the end.
+  // ---- windowed pass: work out WHICH CLOCK the model used ----------------
+  //
+  // Observed for real on a 2812-second episode windowed to 636-829s: the model
+  // returned timestamps in WHOLE-VIDEO time, out to ~2800. The whole-video
+  // rescale below then compressed them proportionally into 0..193 and the offset
+  // shift added 636, producing segments 0.69 and 0.1 seconds long that each
+  // carried a full sentence of dialogue. Those land INSIDE the window, so no
+  // range check catches them, and a deep link built from one points at 646s for
+  // a quote actually spoken near 1900s.
+  //
+  // Proportional rescale is only defensible when the overrun is systematic on a
+  // whole-video pass. On a windowed pass the clock is either the clip's or the
+  // video's, so detect which and never rescale — and when it is neither, refuse
+  // to invent precision: anchor every segment to the window start, which is the
+  // chapter we deliberately chose and therefore an honest place to land.
+  if (window && list.length) {
+    const winLen = Math.max(1, window.endSec - window.startSec);
+    const maxT = Math.max(...list.map((s) => s.end_sec || s.start_sec));
+    const minT = Math.min(...list.map((s) => s.start_sec));
+
+    if (maxT <= winLen * 1.05) {
+      // Clip-relative: clamp to the window length, then shift into video time.
+      for (const seg of list) {
+        seg.start_sec = Math.min(winLen, Math.max(0, seg.start_sec)) + window.startSec;
+        seg.end_sec = Math.min(winLen, Math.max(0, seg.end_sec)) + window.startSec;
+      }
+    } else if (minT >= window.startSec * 0.9 && maxT <= window.endSec * 1.1) {
+      // Already whole-video time: clamp into the window, do NOT shift again.
+      for (const seg of list) {
+        seg.start_sec = Math.min(window.endSec, Math.max(window.startSec, seg.start_sec));
+        seg.end_sec = Math.min(window.endSec, Math.max(window.startSec, seg.end_sec));
+      }
+    } else {
+      // Neither clock. The text is still real; the timing is not placeable.
+      anchorToWindow(list, window);
+      return list;
+    }
+
+    // Frame detection is not enough on its own, and the second run proved it:
+    // with every segment correctly inside its window, one episode still came
+    // back with a NEGATIVE duration and a median of 153 words per second, while
+    // another was entirely plausible at 3.7. A per-call frame guess cannot
+    // rescue output whose segments disagree with each other.
+    //
+    // So the timing gets its own gate, on the one property that is checkable
+    // without the audio: speech rate. Natural speech is 2-3 words a second, and
+    // this codebase's rule is that a null is free while a wrong deep link is
+    // worse than none. If the timings do not look like speech, the whole
+    // window's timing is discarded in favour of a chapter-level anchor.
+    if (!timingsLookLikeSpeech(list)) {
+      anchorToWindow(list, window);
+    }
+    return list;
+  }
+
   if (durationSec && durationSec > 0 && list.length) {
     const maxT = Math.max(...list.map((s) => s.end_sec || s.start_sec));
     if (maxT > durationSec * 1.05) {
@@ -248,6 +337,49 @@ export async function transcribeVideo(
   }
 
   return list;
+}
+
+
+// A deep link that lands on the wrong moment fails the only thing the reviewer
+// needs it to do, so these two helpers decide between real timing and an honest
+// chapter-level fallback.
+
+/** Natural speech is roughly 2-3 words a second. */
+const MIN_WPS = 0.4;
+const MAX_WPS = 8;
+const MAX_SEG_SEC = 240;
+
+function timingsLookLikeSpeech(list: Segment[]): boolean {
+  if (!list.length) return false;
+  let bad = 0;
+  for (const seg of list) {
+    const dur = seg.end_sec - seg.start_sec;
+    const words = seg.text.trim().split(/\s+/).filter(Boolean).length;
+    if (dur <= 0 || dur > MAX_SEG_SEC) {
+      bad++;
+      continue;
+    }
+    const wps = words / dur;
+    if (wps < MIN_WPS || wps > MAX_WPS) bad++;
+  }
+  // A third is generous on purpose: a couple of odd segments in an otherwise
+  // sane pass should not throw away usable timing for the whole window.
+  return bad / list.length <= 1 / 3;
+}
+
+/**
+ * Give up on precision and point at the chapter instead.
+ *
+ * The window was chosen because its published chapter label named the mechanism,
+ * so its start is a genuinely useful place for a link to land — it is the same
+ * anchor a human skimming the chapter list would pick. The segments keep their
+ * order and their text; they simply stop claiming a moment they cannot support.
+ */
+function anchorToWindow(list: Segment[], window: ClipWindow): void {
+  for (const seg of list) {
+    seg.start_sec = window.startSec;
+    seg.end_sec = Math.min(window.endSec, window.startSec + 60);
+  }
 }
 
 // --- Pass 2: quote extraction over persisted TEXT ---------------------------

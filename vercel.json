@@ -8,6 +8,14 @@
     {
       "path": "/api/sweep",
       "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/channels",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/channels/transcribe",
+      "schedule": "30 8 * * *"
     }
   ]
 }

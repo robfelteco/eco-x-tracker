@@ -715,3 +715,127 @@ CREATE TABLE IF NOT EXISTS analog_sweep_state (
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS chain     text;
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS share_url text;
 CREATE INDEX IF NOT EXISTS articles_chain_idx ON articles (chain) WHERE chain IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Migration 012 — the CHANNEL lane: podcast/YouTube sourcing for Lane 1.
+--
+-- Rob added three channels (Money Code, Tokenized, What's Next with Philip
+-- Meissner) as broad-educational sourcing. They do not fit the existing sweep,
+-- and the reason is structural rather than cosmetic:
+--
+--   lib/analogSweep.ts is CONCEPT-FIRST. pickConceptsToSweep() rotates four
+--   concepts, then for each one builds two queries and maps that concept's
+--   institutional hubs. You cannot cheaply ask "what did Tokenized say about
+--   nostro accounts" — you enumerate what the channel published and then decide
+--   which concept it serves. The lane is inverted, so it needs its own ledger.
+--
+-- It is also why these are NOT three new AnalogDef.hubs entries: analogSweep's
+-- SKIP_HOST regex excludes youtube.com deliberately, and mapReportHub + a
+-- Firecrawl scrape of a watch page returns markup, not content.
+--
+-- WHY A PER-VIDEO LEDGER AND NOT JUST analog_sweep_state.
+-- analog_sweep_state is keyed by analog_id, and a channel item routinely lands
+-- on a concept outside today's four-concept rotation. That is the point (the
+-- institutional lane keeps returning evergreen material, so `canonicalOnly`
+-- stays high and no concept ever becomes timely), but it means the bookkeeping
+-- cannot hang off the concept. It hangs off the VIDEO: triage once, transcribe
+-- once, and let unfinished work sort first on the next run — the same
+-- oldest-first idiom as pickConceptsToSweep().
+--
+-- WHAT THE MEASUREMENTS SETTLED (probed against the live API, 36 recent videos):
+--
+--   * detectAnalog() on titles matched 3/36. The vocab is tradfi language
+--     ("nostro", "prefunding"); podcast titles are stablecoin-native ("The
+--     Funding Bottleneck Slowing Stablecoin Payments" — a textbook nostro_vostro
+--     episode that matched nothing). So triage is a model call, and the
+--     deterministic matcher is only ever a cheap PROMOTER, never the filter.
+--
+--   * Every long-form episode ships 10-17 timestamped chapters in its
+--     description (French Hill's 31-minute episode is the exception at zero).
+--     A human-written, timestamped topic index is what makes windowed
+--     transcription possible: two flagged chapters out of a 46-minute episode is
+--     six minutes of Gemini, not forty-six. Hence `chapters` and `windows`.
+--
+--   * Shorts inherit their parent episode's ENTIRE description, byte-identical
+--     (five Money Code shorts and their parent all at 2822 chars). So
+--     description identity is an exact parent key — no fuzzy matching — and
+--     triaging one description group covers the whole clip family. That is also
+--     what produced the earlier apparent false positives: a 44-second clip
+--     "matched" correspondent_banking off its parent's blurb.
+-- ---------------------------------------------------------------------------
+
+-- One row per video we have ever seen on a watched channel. The channel
+-- registry itself lives in code (lib/channels.ts), for the same reason
+-- lib/analogs.ts holds the concepts: which channel is an interested party and
+-- whether its clips are worth taking are editorial judgments, not data.
+CREATE TABLE IF NOT EXISTS channel_videos (
+  video_id          text PRIMARY KEY,           -- YouTube video id
+  channel_id        text NOT NULL,              -- lib/channels.ts def id (UC…)
+  title             text NOT NULL,
+  description       text,
+  published_at      timestamptz,
+  duration_sec      integer,
+  is_short          boolean NOT NULL DEFAULT false,
+
+  -- Exact parent link for a clip cut from a long episode. Deterministic:
+  -- identical description within a channel, longest duration wins as parent.
+  -- desc_key is the sha256 of the normalized description, so the grouping is
+  -- indexable and survives a re-listing.
+  desc_key          text,
+  parent_video_id   text,
+
+  -- [{startSec, title}] parsed off the description. Empty for a short (which
+  -- carries its PARENT's chapter block, and those timestamps do not describe
+  -- the clip) and for the occasional episode published without one.
+  chapters          jsonb NOT NULL DEFAULT '[]',
+
+  -- --- triage (phase 1 stops here) ---------------------------------------
+  triaged_at        timestamptz,
+  triage_verdict    text,                       -- 'relevant' | 'off_topic' | 'unclear'
+  triage_confidence integer,                    -- 0-100, the model's own
+  triage_note       text,                       -- one clause: why
+  analog_ids        text[] NOT NULL DEFAULT '{}', -- may be several; a 50-min
+                                                -- episode legitimately touches
+                                                -- correspondent banking AND
+                                                -- nostro AND SWIFT
+  -- [{startSec, endSec, analogId, why}] — which minutes to transcribe later.
+  windows           jsonb NOT NULL DEFAULT '[]',
+  -- Checkable claims already present in the DESCRIPTION. These are enough for a
+  -- zero-transcription source row (facts_source='description'), which is the
+  -- rung most episodes should stop at.
+  desc_facts        text[] NOT NULL DEFAULT '{}',
+
+  -- --- downstream (phases 2-3; written by later work, declared here so the
+  --     ledger is one table rather than three) ------------------------------
+  source_state      text NOT NULL DEFAULT 'pending',      -- pending|stored|skipped
+  transcribe_state  text NOT NULL DEFAULT 'pending',      -- pending|done|skipped|failed
+  raw_document_id   bigint REFERENCES raw_documents(id) ON DELETE SET NULL,
+  last_error        text,
+
+  first_seen_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS channel_videos_channel_idx ON channel_videos (channel_id, published_at DESC);
+CREATE INDEX IF NOT EXISTS channel_videos_desckey_idx ON channel_videos (channel_id, desc_key);
+-- The work queues: untriaged first, then triaged-relevant awaiting a transcript.
+CREATE INDEX IF NOT EXISTS channel_videos_untriaged_idx ON channel_videos (published_at DESC)
+  WHERE triaged_at IS NULL;
+CREATE INDEX IF NOT EXISTS channel_videos_analog_idx ON channel_videos USING gin (analog_ids);
+
+-- Per-channel rotation state. Mirrors analog_sweep_state: the registry is in
+-- code, so the only thing needing a row per channel is when we last looked and
+-- how it went.
+CREATE TABLE IF NOT EXISTS channel_sweep_state (
+  channel_id        text PRIMARY KEY,
+  last_swept_at     timestamptz,
+  last_status       text,                        -- 'ok' | 'partial' | 'failed'
+  last_listed       integer NOT NULL DEFAULT 0,  -- videos enumerated
+  last_new          integer NOT NULL DEFAULT 0,  -- videos not seen before
+  last_relevant     integer NOT NULL DEFAULT 0,  -- triaged relevant
+  last_error        text,
+  -- Cumulative YouTube Data API quota units. Listing via the uploads playlist
+  -- is 2 units a channel against a 10,000/day allowance; the search.list path
+  -- listChannelUploads() uses is 100. Tracked so that stays visible.
+  quota_units       integer NOT NULL DEFAULT 0,
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);

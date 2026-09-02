@@ -99,3 +99,48 @@ export function surroundingContext(
     after: body.slice(end, end + chars).trim(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Which moment did this quote come from?
+//
+// Pass 2 extracts quotes from TEXT, and segmentsToBody() renders a transcript as
+// "Speaker: text" lines with no timestamps in them. So RawCandidate.start_sec has
+// nothing to be derived from and comes back 0, which youtubeDeepLink() turns into
+// `&t=0` — every YouTube quote card linking to the top of a 47-minute episode
+// instead of the moment. The rescale and clamp work in transcribeVideo() exist to
+// make that link land correctly and were never reaching it.
+//
+// Recovering it needs no prompt change and no second model call: the verbatim
+// gate has already established that the quote appears in the body, so the
+// SEGMENT carrying it can be found the same way and its start_sec used directly.
+// ---------------------------------------------------------------------------
+
+export interface TimedSegment {
+  start_sec: number;
+  text: string;
+}
+
+/** Start time of the segment a quote came from, or null when it cannot be placed. */
+export function segmentStartForQuote(quote: string, segments: TimedSegment[]): number | null {
+  if (!segments.length) return null;
+  const nq = normalizeQuote(quote);
+  if (!nq) return null;
+
+  // Whole quote inside one segment — the common case.
+  for (const s of segments) {
+    if (normalizeQuote(s.text).includes(nq)) return s.start_sec;
+  }
+
+  // A quote can span a speaker turn or a segment boundary. Anchor on where it
+  // STARTS, which is the moment a reviewer wants the link to open at.
+  const head = nq.slice(0, 40);
+  if (head.length >= 12) {
+    for (const s of segments) {
+      if (normalizeQuote(s.text).includes(head)) return s.start_sec;
+    }
+  }
+
+  // Never guess. A null leaves the plain video URL, which is honest; a wrong
+  // offset sends the reviewer to the wrong part of the episode.
+  return null;
+}
