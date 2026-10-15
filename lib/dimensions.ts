@@ -27,7 +27,7 @@ export interface Dimensions {
 
 // --- CHAINS ---------------------------------------------------------------
 // @handle → canonical chain id. The most reliable signal.
-const CHAIN_HANDLES: Record<string, string> = {
+export const CHAIN_HANDLES: Record<string, string> = {
   ethereum: "ethereum",
   solana: "solana",
   polygon: "polygon",
@@ -74,7 +74,7 @@ const CHAIN_HANDLES: Record<string, string> = {
 //     SoFi / MoneyGram post got tagged Stellar purely for the word "stellar".
 //   celo, monad                          — real words / names in other contexts.
 // Every excluded chain is still detected whenever its @handle is mentioned.
-const CHAIN_KEYWORDS: Record<string, string[]> = {
+export const CHAIN_KEYWORDS: Record<string, string[]> = {
   ethereum: ["ethereum"],
   solana: ["solana"],
   polygon: ["polygon"],
@@ -118,7 +118,7 @@ export const CHAIN_LABELS: Record<string, string> = {
 };
 
 // --- ENTITIES (companies / issuers / partners we highlight) ---------------
-const ENTITY_HANDLES: Record<string, string> = {
+export const ENTITY_HANDLES: Record<string, string> = {
   circle: "circle",
   tether_to: "tether",
   tether: "tether",
@@ -152,7 +152,7 @@ const ENTITY_HANDLES: Record<string, string> = {
 
 // Outbound domain → entity. A post linking circle.com is about Circle even if
 // the handle isn't @-mentioned.
-const ENTITY_DOMAINS: Record<string, string> = {
+export const ENTITY_DOMAINS: Record<string, string> = {
   "circle.com": "circle",
   "stripe.com": "stripe",
   "citigroup.com": "citi",
@@ -215,7 +215,49 @@ function mentionsEcoLoose(text: string, mentions: string[], domains: string[]): 
   return false;
 }
 
-export function extractDimensions(input: DimensionInput): Dimensions {
+// Vocabulary that is not in this file — rows from `lane_registry` (Migration
+// 019), so a chain or product can start producing a lane without a deploy.
+// Deliberately a plain argument rather than an import: this module is imported
+// by the backfill scripts and by lib/ingest.ts, and it must stay synchronous
+// and database-free. Whoever has a `sql` handle reads the registry and passes
+// the result down.
+export interface LaneVocabEntry {
+  id: string;
+  handles: string[];
+  terms: string[];
+  /** Ordinary-English tokens — only matched when the post also mentions Eco. */
+  looseTerms: string[];
+  domains: string[];
+}
+
+export interface ExtraVocab {
+  chain: LaneVocabEntry[];
+  /** Eco products. Feed posts.products alongside PRODUCT_DEFS. */
+  product: LaneVocabEntry[];
+  /** Companies shipping Eco infra. Feed posts.entities. */
+  partner: LaneVocabEntry[];
+}
+
+export const EMPTY_VOCAB: ExtraVocab = { chain: [], product: [], partner: [] };
+
+// Does this registry entry match the post? Same precedence as the code path:
+// an @handle or an outbound domain is proof; an unambiguous term is proof; a
+// loose term counts only on a post that mentions Eco.
+function vocabHit(
+  e: LaneVocabEntry,
+  text: string,
+  mentions: string[],
+  domains: string[],
+  ecoish: boolean,
+): boolean {
+  if (e.handles.some((h) => mentions.includes(h.toLowerCase()))) return true;
+  if (e.domains.some((d) => domains.includes(d.toLowerCase()))) return true;
+  if (e.terms.some((t) => hasToken(text, t.toLowerCase()))) return true;
+  if (ecoish && e.looseTerms.some((t) => hasToken(text, t.toLowerCase()))) return true;
+  return false;
+}
+
+export function extractDimensions(input: DimensionInput, extra: ExtraVocab = EMPTY_VOCAB): Dimensions {
   const text = (input.text || "").toLowerCase();
   const mentions = (input.mentions || []).map((m) => m.toLowerCase());
   const domains = (input.domains || []).map((d) => d.toLowerCase());
@@ -234,11 +276,18 @@ export function extractDimensions(input: DimensionInput): Dimensions {
     if (tokens.some((tok) => hasToken(text, tok))) chains.add(chain);
   }
 
+  const ecoish = mentionsEcoLoose(text, mentions, domains);
+  for (const e of extra.chain) if (vocabHit(e, text, mentions, domains, ecoish)) chains.add(e.id);
+  for (const e of extra.partner) if (vocabHit(e, text, mentions, domains, ecoish)) entities.add(e.id);
+  const extraProducts = extra.product
+    .filter((e) => vocabHit(e, text, mentions, domains, ecoish))
+    .map((e) => e.id);
+
   const entityList = [...entities].sort();
   return {
     chains: [...chains].sort(),
     entities: entityList,
-    products: extractProducts(text, mentionsEcoLoose(text, mentions, domains)),
+    products: [...new Set([...extractProducts(text, ecoish), ...extraProducts])].sort(),
     shape: detectShape({
       text: input.text || "",
       mediaType: input.mediaType || "text",
@@ -255,10 +304,28 @@ export function isChainHandle(handle: string): boolean {
   return !!CHAIN_HANDLES[handle.toLowerCase()];
 }
 
-// Display helpers (fall back to a capitalized id for anything not in the map).
+// Labels for ids that exist only in `lane_registry` (Migration 019). Every
+// caller of chainLabel/entityLabel is synchronous and most are deep inside a
+// render, so rather than thread a label map through all of them, the registry
+// installs what it read once per process and the lookups fall through to it.
+//
+// A module global is safe here specifically because a label is not per-request
+// state: "arc" is called Arc for everyone. Anything genuinely request-scoped
+// (which lanes are active, what the vocabulary is) is passed as an argument
+// instead — see ExtraVocab above.
+const REGISTERED_CHAIN_LABELS: Record<string, string> = {};
+const REGISTERED_ENTITY_LABELS: Record<string, string> = {};
+
+export function installLaneLabels(chains: Record<string, string>, entities: Record<string, string>): void {
+  Object.assign(REGISTERED_CHAIN_LABELS, chains);
+  Object.assign(REGISTERED_ENTITY_LABELS, entities);
+}
+
+// Display helpers. Code map first (it is reviewed), then the registry, then a
+// capitalized id — which is still better than a bare slug on screen.
 export function chainLabel(id: string): string {
-  return CHAIN_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+  return CHAIN_LABELS[id] ?? REGISTERED_CHAIN_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 }
 export function entityLabel(id: string): string {
-  return ENTITY_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+  return ENTITY_LABELS[id] ?? REGISTERED_ENTITY_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 }

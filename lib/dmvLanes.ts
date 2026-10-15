@@ -1,4 +1,5 @@
 import { chainLabel } from "./dimensions.ts";
+import { getIntegratedChains } from "./integratedChains.ts";
 import { TEMPLATE_BY_ID } from "./taxonomy.ts";
 
 // Data Motion Visual, split into three lanes.
@@ -21,10 +22,12 @@ import { TEMPLATE_BY_ID } from "./taxonomy.ts";
 //   market_wide — data with no single chain as its subject. Stablecoin supply,
 //                 volume crossovers, market share shifts.
 //
-// Which chains count as integrated is DERIVED, not listed, so the split cannot
-// drift out of date the way a hardcoded array would: a chain is integrated once
-// it has an integration article or a post filed under New Chain Integrations.
-// Adding a chain to lib/dimensions.ts does not silently make it "integrated".
+// Which chains count as integrated comes from lib/integratedChains.ts, so this
+// card and the chain-momentum tab can never disagree about it. That is mostly
+// derived — an integration article, or a post filed under New Chain
+// Integrations — plus a small hand-kept list of chains Eco is live on that
+// never got a dedicated piece. Adding a chain to lib/dimensions.ts does not
+// silently make it "integrated".
 
 export type DmvLaneId = "integrated" | "other_chain" | "market_wide";
 
@@ -103,15 +106,7 @@ export async function getDmvLanes(sql: SqlTag, filter: DmvFilterish): Promise<Dm
   const includeAll = filter.amplified === "all";
   const wantAmplified = filter.amplified === "amplified";
 
-  // Which chains Eco is live on. Two sources, unioned: a seeded integration
-  // article, or a post actually filed under the integration pillar.
-  const integratedRows = await sql<{ chain: string }>`
-    SELECT chain FROM articles WHERE chain IS NOT NULL AND kind = 'chain_integration'
-    UNION
-    SELECT unnest(chains) AS chain FROM posts
-      WHERE template = 'integration_announcement' AND is_reply = false
-  `;
-  const integrated = new Set(integratedRows.map((r) => r.chain));
+  const integrated = await getIntegratedChains(sql);
 
   const rows = await sql<{
     id: string;

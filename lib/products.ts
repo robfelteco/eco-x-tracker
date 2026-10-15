@@ -67,6 +67,14 @@ export const PRODUCT_DEFS: ProductDef[] = [
     terms: ["programmable address", "programmable addresses"],
   },
   {
+    id: "eco_api",
+    label: "Eco API",
+    brief:
+      "The Eco API (launched 14 Oct 2026) puts Eco's whole surface behind one versioned base URL at api.eco.com: quoting, funding, routing and transaction status, with one key, one request shape and one error catalog. It replaced separate services with different shapes (the quotes service, the solver's endpoints). Quotes group source and destination into their own objects with an explicit funder; swaps and transfers return fuller route data; and Eco signs every quote, so an integrator can verify recipient, amounts, expiry and their own destination conditions before funds move. One verification covers every route, whether a quote carries one intent or batches several. Built for wallets (one-click transfer/swap quotes), exchanges (deposit flows) and treasury apps (automated movement between networks with tracked status).",
+    guardrail: "It is a unified interface over existing Eco products, not a new execution engine. Do not claim new chains or assets beyond 'upgraded routing and asset coverage'.",
+    terms: ["eco api", "api.eco.com"],
+  },
+  {
     id: "fast_deposits",
     label: "Fast Deposits",
     brief:

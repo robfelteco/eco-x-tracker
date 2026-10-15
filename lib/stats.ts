@@ -2,6 +2,7 @@ import { sql } from "./db.ts";
 import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
 import { chainLabel, entityLabel } from "./dimensions.ts";
 import { productLabel, SHAPE_BY_ID, PRODUCT_POST_SHAPES } from "./products.ts";
+import { getLaneRegistry, type LaneRegistry } from "./laneRegistry.ts";
 import { getArticleShelf, type ArticleShelfRow } from "./articles.ts";
 import { getDocShelf, getHomepagePenalty, type DocShelfRow, type HomepagePenalty } from "./docs.ts";
 import { getVideoShelf, type VideoShelfRow } from "./videos.ts";
@@ -283,6 +284,7 @@ export interface Recommendation extends TemplateStat {
   easyWin: boolean; // low-effort format worth a quick post (quote card, motion visual)
   chains: ChainAngle[]; // best-performing chain angles — only meaningful for the chain pillar
   products: ProductAngle[]; // Eco products this pillar has covered, ranked
+  partners: PartnerAngle[]; // companies running Eco in production, ranked — the third Product Posts axis
   suggested: SuggestedPost | null; // the specific proven post to re-run, ≤3mo old
 }
 
@@ -341,6 +343,35 @@ export interface ProductAngle {
   articles: ArticleShelfRow[]; // this product's pieces, most re-runnable first
 }
 
+// The PARTNER axis — companies shipping Eco infra in their own product.
+//
+// Product Posts' own description names three flavours: product releases,
+// product education, and "PARTNERS INTEGRATING ECO". The first two rotate on
+// PRODUCT_DEFS; the third rotated on nothing, so a run of partner posts kept
+// the pillar's clock fresh while no individual relationship had a clock at all
+// — the same structural blind spot the Data Motion Visual split was built to
+// fix, one pillar over. Circle was posted five times and Para not since April,
+// and the card had no way to say so.
+//
+// Which entities count is a registry decision, not a tagging one: ENTITY_LABELS
+// holds every company worth tagging, including ones we only write ABOUT. A
+// partner lane is drawn only for the ones in lane_registry (Migration 019).
+export interface PartnerAngle {
+  partner: string;
+  label: string;
+  count: number;
+  lastPosted: string | null;
+  daysSince: number | null;
+  medianImpr: number | null;
+  readiness: Readiness;
+  /** How this partner is written about — the same seven shapes as products. */
+  shapes: ShapeUse[];
+  /** True when the lane came from the sync detector and has not been reviewed. */
+  autoDetected: boolean;
+  /** The lane's fact sheet, handed to the copy drafter. */
+  brief: string | null;
+}
+
 // Broad-educational never reshares the same piece, so instead of "post this
 // again" we show what WORKED as an approach: content-type mix, the entities that
 // landed, and a few reference angles. The actual sourcing comes from Discover.
@@ -389,6 +420,30 @@ export interface Insights {
   dmvLanes: DmvLane[];
   // Broad Educational's angle bank — what replaced its drafter (lib/angleBank.ts).
   angleBank: AngleBank;
+  // Lanes the sync detector drew and nobody has looked at yet (Migration 019).
+  // They are LIVE — they already appear in their pillar's lane list — and this
+  // is the place to rename, merge or dismiss one.
+  pendingLanes: PendingLane[];
+}
+
+export interface PendingLane {
+  kind: "chain" | "product" | "partner";
+  id: string;
+  label: string;
+  /** What the detector matched on, so a bad lane is obvious at a glance. */
+  handles: string[];
+  terms: string[];
+  brief: string | null;
+  /** The model's one-line reason, and the post that produced it. */
+  why: string | null;
+  postId: string | null;
+  postUrl: string | null;
+  postText: string | null;
+  createdAt: string | null;
+  /** Lanes of the same kind, so "merge into…" can be offered inline. */
+  mergeTargets: { id: string; label: string }[];
+  /** How many posts currently sit in this lane. 0 means the lane is inert. */
+  postCount: number;
 }
 
 export type { DmvLane, DmvLaneId } from "./dmvLanes.ts";
@@ -417,6 +472,11 @@ const SUGGEST_MAX_AGE_DAYS = 90;
 export async function getInsights(filter: StatFilter): Promise<Insights> {
   const { includeAll, wantAmplified } = ampFlags(filter.amplified);
   const overview = await getOverview(filter);
+
+  // The lane registry (Migration 019), read once at the top: it supplies the
+  // labels for lanes that exist only in the table, the whitelist the partner
+  // axis is drawn from, and the review tray at the bottom of the page.
+  const registry = await getLaneRegistry(sql);
 
   // Per (template, chain) angle stats — from each post's latest snapshot. Posts
   // with no chain simply contribute no rows here (unnest of an empty array).
@@ -557,6 +617,48 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     });
     anglesByTemplate.set(a.template, list);
   }
+
+  // A chain with an integration piece but no post yet on this pillar still
+  // needs a row. The angle table above is built from POSTS, so a chain only
+  // appears once the pillar has already announced it — which meant the one
+  // state the pillar exists to act on, "we have the article and have never run
+  // it", was the one state it could not show. Arbitrum was exactly that: the
+  // usage piece has been live since Jul 2025 and the chain has never been
+  // posted under New Chain Integrations, so it was absent from the card
+  // entirely rather than sitting at the top of it.
+  //
+  // These rows carry no pillar stats (never announced here, so there is nothing
+  // to median) and are ranked on cross-pillar coverage like every other row.
+  {
+    const list = anglesByTemplate.get("integration_announcement") ?? [];
+    const seen = new Set(list.map((c) => c.chain));
+    const def = TEMPLATE_BY_ID.integration_announcement;
+    for (const art of chainArticleRows) {
+      if (seen.has(art.chain)) continue;
+      const cov = coverageByChain.get(art.chain);
+      list.push({
+        chain: art.chain,
+        label: chainLabel(art.chain),
+        count: 0,
+        lastPosted: null,
+        daysSince: null,
+        medianImpr: null,
+        avgImpr: null,
+        readiness: readinessOf(cov?.daysSince ?? null, def.staleDays),
+        coverCount: cov?.count ?? 0,
+        coverDaysSince: cov?.daysSince ?? null,
+        coverTemplate: cov?.lastTemplate ?? null,
+        coverLabel: cov ? TEMPLATE_BY_ID[cov.lastTemplate].label : null,
+        coveredElsewhere: cov != null,
+        articleId: art.articleId,
+        articleTitle: art.title,
+        shareUrl: art.shareUrl,
+        priorTexts: art.priorTexts.slice(0, 6),
+      });
+    }
+    if (list.length) anglesByTemplate.set("integration_announcement", list);
+  }
+
   // Coldest-first: an angle the audience hasn't seen in a while is the one worth
   // reaching for. Ties broken by how well the angle performs in this pillar, so
   // among equally-rested chains the strongest still floats up.
@@ -664,7 +766,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     const list = productsByTemplate.get(r.template) ?? [];
     list.push({
       product: r.product,
-      label: productLabel(r.product),
+      label: registry.labels.product[r.product] ?? productLabel(r.product),
       count: r.count,
       lastPosted: r.lastPosted,
       daysSince: r.daysSince,
@@ -674,6 +776,145 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
       articles: [],
     });
     productsByTemplate.set(r.template, list);
+  }
+
+  // --- PARTNER angles ------------------------------------------------------
+  // Same shape as the product table, over posts.entities, restricted to the
+  // entities the lane registry calls partners. The restriction is the whole
+  // point: unnesting entities raw would draw a "Visa lane" off a market post
+  // that merely cited Visa's volume, and a lane is a standing commitment to
+  // keep posting about a relationship.
+  const partnerIds = registry.byKind.partner.map((r) => r.id);
+
+  const partnerRows = partnerIds.length
+    ? await sql<{
+        template: Template;
+        partner: string;
+        count: number;
+        lastPosted: string | null;
+        daysSince: number | null;
+        medianImpr: number | null;
+      }>`
+        WITH latest AS (
+          SELECT p.template, p.created_at, p.entities, s.impressions
+          FROM posts p
+          LEFT JOIN LATERAL (
+            SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+          ) s ON true
+          WHERE p.template IS NOT NULL AND p.template <> 'other'
+            AND p.is_reply = false
+            AND (${includeAll} OR p.amplified = ${wantAmplified})
+            AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+        ),
+        exploded AS (
+          SELECT template, created_at, impressions, unnest(entities) AS partner FROM latest
+        )
+        SELECT template, partner,
+          COUNT(*)::int AS count,
+          MAX(created_at) AS "lastPosted",
+          EXTRACT(DAY FROM now() - MAX(created_at))::int AS "daysSince",
+          ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY impressions))::int AS "medianImpr"
+        FROM exploded
+        WHERE partner = ANY(${partnerIds}::text[])
+        GROUP BY template, partner
+        ORDER BY "medianImpr" DESC NULLS LAST
+      `
+    : [];
+
+  const partnerShapeRows = partnerIds.length
+    ? await sql<{ template: Template; partner: string; shape: string; count: number; daysSince: number | null; medianImpr: number | null }>`
+        WITH latest AS (
+          SELECT p.template, p.created_at, p.entities, p.shape, s.impressions
+          FROM posts p
+          LEFT JOIN LATERAL (
+            SELECT * FROM metric_snapshots m WHERE m.post_id = p.id ORDER BY m.fetched_at DESC LIMIT 1
+          ) s ON true
+          WHERE p.template IS NOT NULL AND p.shape IS NOT NULL
+            AND p.is_reply = false
+            AND (${includeAll} OR p.amplified = ${wantAmplified})
+            AND (${filter.since}::timestamptz IS NULL OR p.created_at >= ${filter.since}::timestamptz)
+        ),
+        exploded AS (
+          SELECT template, created_at, impressions, shape, unnest(entities) AS partner FROM latest
+        )
+        SELECT template, partner, shape,
+          COUNT(*)::int AS count,
+          EXTRACT(DAY FROM now() - MAX(created_at))::int AS "daysSince",
+          ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY impressions))::int AS "medianImpr"
+        FROM exploded
+        WHERE partner = ANY(${partnerIds}::text[])
+        GROUP BY template, partner, shape
+      `
+    : [];
+
+  const partnerShapesByKey = new Map<string, ShapeUse[]>();
+  for (const r of partnerShapeRows) {
+    const key = `${r.template}|${r.partner}`;
+    const list = partnerShapesByKey.get(key) ?? [];
+    list.push({
+      shape: r.shape,
+      label: SHAPE_BY_ID[r.shape]?.label ?? r.shape,
+      count: r.count,
+      daysSince: r.daysSince,
+      medianImpr: r.medianImpr,
+    });
+    partnerShapesByKey.set(key, list);
+  }
+
+  const partnerRowById = new Map(registry.byKind.partner.map((r) => [r.id, r]));
+  const partnersByTemplate = new Map<Template, PartnerAngle[]>();
+  for (const r of partnerRows) {
+    const def = TEMPLATE_BY_ID[r.template];
+    const used = new Map((partnerShapesByKey.get(`${r.template}|${r.partner}`) ?? []).map((u) => [u.shape, u]));
+    const shapes: ShapeUse[] = PRODUCT_POST_SHAPES.map(
+      (sh) => used.get(sh.id) ?? { shape: sh.id, label: sh.label, count: 0, daysSince: null, medianImpr: null },
+    ).sort((a, b) => a.count - b.count || (b.medianImpr ?? 0) - (a.medianImpr ?? 0));
+    const reg = partnerRowById.get(r.partner);
+    const list = partnersByTemplate.get(r.template) ?? [];
+    list.push({
+      partner: r.partner,
+      label: reg?.label ?? entityLabel(r.partner),
+      count: r.count,
+      lastPosted: r.lastPosted,
+      daysSince: r.daysSince,
+      medianImpr: r.medianImpr,
+      readiness: readinessOf(r.daysSince, def.staleDays),
+      shapes,
+      autoDetected: reg?.source === "auto" && !reg.reviewed,
+      brief: reg?.brief ?? null,
+    });
+    partnersByTemplate.set(r.template, list);
+  }
+
+  // A registered partner with no post in this pillar yet still needs a row —
+  // "we signed this and have never posted it" is the single most actionable
+  // state a partner lane can be in, and building the list from posts alone is
+  // exactly what hid it.
+  {
+    const list = partnersByTemplate.get("product_post") ?? [];
+    const seen = new Set(list.map((p) => p.partner));
+    const def = TEMPLATE_BY_ID.product_post;
+    for (const reg of registry.byKind.partner) {
+      if (seen.has(reg.id)) continue;
+      list.push({
+        partner: reg.id,
+        label: reg.label,
+        count: 0,
+        lastPosted: null,
+        daysSince: null,
+        medianImpr: null,
+        readiness: readinessOf(null, def.staleDays),
+        shapes: PRODUCT_POST_SHAPES.map((sh) => ({ shape: sh.id, label: sh.label, count: 0, daysSince: null, medianImpr: null })),
+        autoDetected: reg.source === "auto" && !reg.reviewed,
+        brief: reg.brief,
+      });
+    }
+    if (list.length) partnersByTemplate.set("product_post", list);
+  }
+
+  // Coldest first, ties on performance — the same ranking the chain lanes use.
+  for (const list of partnersByTemplate.values()) {
+    list.sort((a, b) => (b.daysSince ?? 1e9) - (a.daysSince ?? 1e9) || (b.medianImpr ?? 0) - (a.medianImpr ?? 0));
   }
 
   // The single best proven post to re-run per pillar, from the last 3 months.
@@ -896,6 +1137,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
         easyWin: EASY_WIN_TEMPLATES.has(t.template),
         chains: chainAngles,
         products: productsByTemplate.get(t.template) ?? [],
+        partners: partnersByTemplate.get(t.template) ?? [],
         suggested: suggestedByTemplate.get(t.template) ?? null,
       };
     })
@@ -1043,6 +1285,8 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     getAngleBank(sql),
   ]);
 
+  const pendingLanes = await buildPendingLanes(registry);
+
   return {
     recommendations,
     reAmplify,
@@ -1055,7 +1299,59 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     curriculum,
     dmvLanes,
     angleBank,
+    pendingLanes,
   };
+}
+
+/**
+ * The review tray: auto-detected lanes nobody has confirmed.
+ *
+ * Each row carries the evidence — the post that produced it and what the lane
+ * matches on — because the only cheap way to spot a bad lane is to read the one
+ * sentence that caused it. `postCount` is the other tell: a lane matching zero
+ * posts is inert and should be dismissed or given a better handle.
+ */
+async function buildPendingLanes(registry: LaneRegistry): Promise<PendingLane[]> {
+  if (!registry.pending.length) return [];
+
+  const postIds = registry.pending.map((l) => l.evidencePostId).filter((x): x is string => !!x);
+  const evidence = postIds.length
+    ? await sql<{ id: string; url: string; text: string }>`
+        SELECT id, url, text FROM posts WHERE id = ANY(${postIds}::text[])
+      `
+    : [];
+  const byId = new Map(evidence.map((r) => [r.id, r]));
+
+  const counts = await sql<{ kind: string; id: string; n: number }>`
+    SELECT 'chain' AS kind, unnest(chains) AS id, count(*)::int AS n FROM posts WHERE is_reply = false GROUP BY 2
+    UNION ALL
+    SELECT 'product', unnest(products), count(*)::int FROM posts WHERE is_reply = false GROUP BY 2
+    UNION ALL
+    SELECT 'partner', unnest(entities), count(*)::int FROM posts WHERE is_reply = false GROUP BY 2
+  `;
+  const countBy = new Map(counts.map((r) => [`${r.kind}|${r.id}`, r.n]));
+
+  return registry.pending.map((l) => {
+    const post = l.evidencePostId ? byId.get(l.evidencePostId) : undefined;
+    return {
+      kind: l.kind,
+      id: l.id,
+      label: l.label,
+      handles: l.handles,
+      // The operator should see everything the lane matches on, hard or loose.
+      terms: [...l.terms, ...l.looseTerms],
+      brief: l.brief,
+      why: l.evidenceNote,
+      postId: l.evidencePostId,
+      postUrl: post?.url ?? null,
+      postText: post?.text ?? null,
+      createdAt: l.createdAt,
+      mergeTargets: registry.byKind[l.kind]
+        .filter((r) => r.id !== l.id)
+        .map((r) => ({ id: r.id, label: r.label })),
+      postCount: countBy.get(`${l.kind}|${l.id}`) ?? 0,
+    };
+  });
 }
 
 export async function getTemplateDetail(template: Template, filter: StatFilter): Promise<TemplateDetail> {

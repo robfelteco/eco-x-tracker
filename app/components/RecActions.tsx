@@ -154,6 +154,10 @@ export interface ProductGroup {
   readiness: string;
   shapes: ShapeUse[];
   targets: Target[];
+  /** Drawn by the sync detector and not yet confirmed (Migration 019). */
+  autoDetected?: boolean;
+  /** The lane's fact sheet. Shown on a partner lane, which has no article shelf. */
+  brief?: string | null;
 }
 
 export interface DocsMeta {
@@ -229,6 +233,7 @@ export function RecActions({
   mode,
   targets = [],
   products = [],
+  partners = [],
   lanes = [],
   docsMeta,
   videosMeta,
@@ -245,6 +250,8 @@ export function RecActions({
   mode: DraftMode;
   targets?: Target[];
   products?: ProductGroup[];
+  /** The third Product Posts axis: companies running Eco in production. */
+  partners?: ProductGroup[];
   lanes?: LaneGroup[];
   docsMeta?: DocsMeta;
   videosMeta?: VideosMeta;
@@ -284,6 +291,9 @@ export function RecActions({
 
   // Which product accordion is open (products mode).
   const [openProduct, setOpenProduct] = useState<string | null>(products[0]?.key ?? null);
+  // Partners are a separate accordion from products — they are a different
+  // axis, not a different product, and opening one should not close the other.
+  const [openPartner, setOpenPartner] = useState<string | null>(null);
   // Which lane is open (docs / videos modes). Opens on the top-ranked lane,
   // which is the coldest audience or series — the answer to "what now".
   const [openLane, setOpenLane] = useState<string | null>(lanes[0]?.key ?? null);
@@ -1074,7 +1084,7 @@ export function RecActions({
         ) : (
           <span className="text-white/30">
             {mode === "chains" && "Pick a chain angle and draft copy for it."}
-            {mode === "products" && "Pick the product, then the piece behind it. Shapes show which angle has gone cold."}
+            {mode === "products" && "Pick the product, then the piece behind it — or a partner running Eco. Shapes show which angle has gone cold."}
             {mode === "articles" && "One row per article, not per post — the count is how many times we've already run it."}
             {isBroadDiscovery &&
               "Two jobs in one pillar: teach a mechanism nobody has explained, or find fresh market news. (We never reshare a piece.)"}
@@ -1242,6 +1252,52 @@ export function RecActions({
               </NestedDisclosure>
             );
           })}
+
+          {/* The PARTNER axis. Separate from products on purpose: this pillar's
+              own description names "partners integrating Eco" as one of three
+              flavours, and it was the only one with nothing to rotate on — so a
+              run of partner posts kept the pillar fresh while no individual
+              relationship had a clock. A partner lane has no article shelf
+              behind it, so the brief does the work the article would. */}
+          {partners.length > 0 && (
+            <div className="mt-4 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-white/30">
+                  Partners running Eco
+                </span>
+                <span className="text-[11px] text-white/25">
+                  — coldest first. A partner with no posts is one we signed and never told anyone about.
+                </span>
+              </div>
+              {partners.map((p) => {
+                const open = openPartner === p.key;
+                const cold = p.shapes.filter((sh) => sh.count === 0).slice(0, 3);
+                return (
+                  <NestedDisclosure
+                    key={p.key}
+                    label={p.label}
+                    sublabel={p.sublabel}
+                    count={p.autoDetected ? "auto-detected" : `${p.targets.length} to draft from`}
+                    open={open}
+                    onToggle={() => setOpenPartner(open ? null : p.key)}
+                  >
+                    {p.brief && <p className="text-[11px] leading-relaxed text-white/45">{p.brief}</p>}
+                    {cold.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <span className="font-mono text-[10px] uppercase tracking-wider text-white/25">Never used here</span>
+                        {cold.map((sh) => (
+                          <span key={sh.shape} className="rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-1.5 py-0.5 text-emerald-300/80">
+                            {sh.label}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="space-y-1.5">{p.targets.map((t) => renderTarget(t, true))}</div>
+                  </NestedDisclosure>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

@@ -430,3 +430,88 @@ Two crons, on separate clocks for the same reason `/api/sweep` is split from
 
 A fabricated-transcript abort returns **500**, not a thin 200 — it must not read
 as a quiet day.
+
+## Lanes, and how new ones get drawn
+
+A **lane** is a recurring subject the Prioritize page ranks and clocks: a chain
+Eco routes on, an Eco product, or a partner running Eco in production. Lanes are
+what turns "Product Posts is 10 days cold" into "Permit3 is 45 days cold and
+Programmable Addresses is 156".
+
+Every lane is built by unnesting a tagged array on `posts` — `chains`,
+`products`, `entities`. That is where lanes used to silently fail to appear.
+Classification is a model and generalises: it filed the Arc announcement under
+New Chain Integrations having never heard of Arc. Dimension tagging was a regex
+over hardcoded maps (`CHAIN_HANDLES` in `lib/dimensions.ts`, `PRODUCT_DEFS` in
+`lib/products.ts`) and did not: it wrote `chains = {}` on the same row. The post
+then counted toward the pillar's clock and fed no lane at all — which looks
+exactly like success on every screen. Arc, Smart Deposits and the B2C2
+integration were all in that state at once.
+
+### The registry
+
+`lane_registry` (Migration 019) makes a lane a row. The code registries stay as
+the seed — they carry the briefs, guardrails and deliberate exclusions that took
+work to get right — and the table is unioned over them, so a new lane needs no
+deploy. `lib/laneRegistry.ts` merges the two and hands out:
+
+- the **vocabulary** (`@handles`, terms, domains) that `extractDimensions` matches on,
+- the **labels** for ids that exist only in the table,
+- the **partner whitelist** the partner axis is drawn from,
+- the **pending list** behind the review tray.
+
+### Detection at sync
+
+`lib/laneDetect.ts` runs at the end of every sync, after classification. It asks
+one question about each untagged post in a lane-bearing pillar: *is this about a
+subject we have no lane for?* New lanes are written live and the corpus is
+re-tagged, so the posts that motivated the lane are in it immediately.
+
+Three guards, because the expensive failure is inventing lanes:
+
+1. **A prose floor.** Most untagged posts are bare `https://t.co/…` amplifiers.
+   They never reach the model.
+2. **`lane_detect_seen`.** Every post looked at is recorded with its outcome, so
+   a first pass over history is paid for once and steady state is one call per
+   genuinely new subject.
+3. **Term hygiene.** The model proposed `arc` and `penny` as hard match terms on
+   the first run — ordinary English words, the same failure that once put a
+   phantom Stellar chip on a Western Union post. Terms under four characters are
+   dropped; terms already matching more than a handful of posts are dropped as
+   ordinary words; what survives lands in `loose_terms`, matched only when the
+   post also mentions Eco. Only `@handles` are taken as hard signal.
+
+### The review tray
+
+Auto-detected lanes appear at the top of Prioritize (`app/components/LaneTray.tsx`).
+They are **already live** — that is the point; a chain we have announced should
+not wait on a click to get a clock. The tray is where a wrong one is corrected:
+**Keep**, **Rename**, **Merge into…** (tags move to the target lane), or **Not a
+lane** (dismissed permanently — the detector will not re-propose it). Merge and
+dismiss re-tag the corpus before returning.
+
+Each row shows the post that produced the lane, what it matches on, and how many
+posts it caught. Zero posts means an inert lane; a suspiciously high count means
+an ordinary word slipped the filter.
+
+### Running it by hand
+
+```
+node --env-file=.env scripts/detect-lanes.ts
+```
+
+`LANE_DETECT_MAX_CALLS` (default 25) caps calls per run; `LANE_DETECT_MODEL`
+overrides the model.
+
+### The partner axis
+
+Product Posts' own description names three flavours — product releases, product
+education, and partners integrating Eco. The first two rotated on `PRODUCT_DEFS`;
+the third rotated on nothing, so a run of partner posts kept the pillar's clock
+fresh while no individual relationship had a clock. `PartnerAngle` in
+`lib/stats.ts` is that third axis, drawn over `posts.entities` restricted to
+registry partners — `ENTITY_LABELS` is deliberately wider, holding companies we
+only ever write *about* (Visa, DoorDash), and a lane is a standing commitment to
+keep posting about a relationship. A registered partner with zero posts gets a
+row too: "we signed this and never told anyone" is the most actionable state a
+partner lane has.

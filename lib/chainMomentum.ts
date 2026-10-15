@@ -1,5 +1,6 @@
 import { xGet, countBilledReads, resolveHandle } from "./twitter.ts";
 import { chainLabel } from "./dimensions.ts";
+import { getIntegratedChains } from "./integratedChains.ts";
 import { CHAIN_ACCOUNTS } from "./chainAccounts.ts";
 
 // Is the timeline paying attention to a chain right now?
@@ -285,12 +286,7 @@ export async function getMomentum(sql: SqlTag): Promise<ChainMomentum[]> {
   `;
   const coverByChain = new Map(coverRows.map((r) => [r.chain, r]));
 
-  const integratedRows = await sql<{ chain: string }>`
-    SELECT chain FROM articles WHERE chain IS NOT NULL AND kind = 'chain_integration'
-    UNION
-    SELECT unnest(chains) FROM posts WHERE template = 'integration_announcement' AND is_reply = false
-  `;
-  const integrated = new Set(integratedRows.map((r) => r.chain));
+  const integrated = await getIntegratedChains(sql);
 
   const byChain = new Map<string, typeof rows>();
   for (const r of rows) {

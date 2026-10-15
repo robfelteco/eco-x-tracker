@@ -68,9 +68,13 @@ const CHAIN_ARTICLES: ChainArticle[] = [
     anchorStatusId: "2082451890869059861",
     xArticleId: "2082239814879854593",
   },
-  // Both predate X articles — blog link only.
+  // All three predate X articles — blog link only.
   { chain: "solana", slug: "eco-powers-stablecoin-bridging-between-solana-in-seconds-not-steps", anchorStatusId: null, xArticleId: null },
   { chain: "polygon", slug: "eco-powers-next-chapter-of-polygons-stablecoin-economy", anchorStatusId: null, xArticleId: null },
+  // Not an integration ANNOUNCEMENT — Arbitrum was live before this ran. It is
+  // the usage piece (35% of Portal transfers), and it is the only published Eco
+  // article about the chain, so it is what the pillar drafts from.
+  { chain: "arbitrum", slug: "arbitrum-leads-usage-across-eco", anchorStatusId: null, xArticleId: null },
 ];
 
 const MONTHS: Record<string, string> = {

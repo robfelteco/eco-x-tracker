@@ -10,7 +10,9 @@ import {
 } from "./twitter.ts";
 import { runRuleClassification, runClaudeClassification } from "./classify.ts";
 import { enrichByIds, enrichQuotedImages } from "./enrich.ts";
-import { extractDimensions } from "./dimensions.ts";
+import { extractDimensions, EMPTY_VOCAB, type ExtraVocab } from "./dimensions.ts";
+import { getLaneRegistry } from "./laneRegistry.ts";
+import { detectLanes } from "./laneDetect.ts";
 import { detectAnalog } from "./analogs.ts";
 
 // Posts younger than this are eligible for a non_public_metrics attempt and for
@@ -28,11 +30,13 @@ export interface SyncResult {
   estCostUsd: number;
   summary: string;
   errors: string[];
+  /** Lanes the sync registered for subjects it had no lane for. */
+  lanes: { created: number; widened: number; retagged: number; labels: string[] };
 }
 
 // Upsert a batch of posts. Preserves the manual `amplified` flag and any human
 // classification already on the row (COALESCE / no-clobber on those columns).
-async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: number }> {
+async function upsertPosts(posts: XPost[], vocab: ExtraVocab = EMPTY_VOCAB): Promise<{ added: number; updated: number }> {
   let added = 0;
   let updated = 0;
   for (const p of posts) {
@@ -42,15 +46,21 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
     // existing external-link card with nulls on a re-ingest).
     const hasArticle = !!(p.link_title || p.link_image_url);
     // Chain / entity / PRODUCT sub-dimensions — deterministic, recomputed on
-    // every upsert so a widened vocabulary (lib/dimensions.ts, lib/products.ts)
-    // takes effect on the next sync.
-    const dim = extractDimensions({
-      text: p.text,
-      mentions: p.mentions,
-      domains: p.domains,
-      mediaType: p.mediaType,
-      linkTitle: p.link_title,
-    });
+    // every upsert so a widened vocabulary takes effect on the next sync. The
+    // vocabulary is now two sources: the code registries compiled into
+    // lib/dimensions.ts and lib/products.ts, and the `lane_registry` rows read
+    // once at the top of this sync (Migration 019), so a lane added yesterday
+    // tags today without a deploy.
+    const dim = extractDimensions(
+      {
+        text: p.text,
+        mentions: p.mentions,
+        domains: p.domains,
+        mediaType: p.mediaType,
+        linkTitle: p.link_title,
+      },
+      vocab,
+    );
     // Which tradfi analog concept, if any, this post actually teaches. Runs over
     // the link card too — an external explainer's title is usually where the
     // concept name lives, not in our own copy above it. Recomputed on every
@@ -108,6 +118,49 @@ async function upsertPosts(posts: XPost[]): Promise<{ added: number; updated: nu
     else updated++;
   }
   return { added, updated };
+}
+
+// Widen each post's chain / entity / product tags with what its link card says.
+// Union, never replace: the body-only tags are already correct, the card can
+// only add to them.
+async function retagFromCards(ids: string[], vocab: ExtraVocab): Promise<void> {
+  if (!ids.length) return;
+  const rows = await sql<{
+    id: string;
+    text: string;
+    mentions: string[];
+    domains: string[];
+    media_type: string;
+    link_title: string | null;
+    link_description: string | null;
+    chains: string[];
+    entities: string[];
+    products: string[];
+  }>`
+    SELECT id, text, mentions, domains, media_type, link_title, link_description, chains, entities, products
+    FROM posts WHERE id = ANY(${ids}) AND link_title IS NOT NULL`;
+  const union = (a: string[], b: string[]) => [...new Set([...(a ?? []), ...b])].sort();
+  for (const r of rows) {
+    const dim = extractDimensions(
+      {
+        text: [r.text, r.link_title, r.link_description].filter(Boolean).join(" \n "),
+        mentions: r.mentions,
+        domains: r.domains,
+        mediaType: r.media_type,
+        linkTitle: r.link_title,
+      },
+      vocab,
+    );
+    const chains = union(r.chains, dim.chains);
+    const entities = union(r.entities, dim.entities);
+    const products = union(r.products, dim.products);
+    if (
+      chains.length === (r.chains ?? []).length &&
+      entities.length === (r.entities ?? []).length &&
+      products.length === (r.products ?? []).length
+    ) continue;
+    await sql`UPDATE posts SET chains = ${chains}, entities = ${entities}, products = ${products} WHERE id = ${r.id}`;
+  }
 }
 
 // Append one metric snapshot per post, deduped to one per UTC day. A second run
@@ -177,6 +230,16 @@ export async function runSync(opts: {
   let classified = 0;
   let enriched = 0;
   let ok = true;
+  const lanes = { created: 0, widened: 0, retagged: 0, labels: [] as string[] };
+
+  // The lane vocabulary for this run. Read once, before anything is written, so
+  // every post in the batch is tagged against the same registry.
+  let vocab = EMPTY_VOCAB;
+  try {
+    vocab = (await getLaneRegistry(sql)).vocab;
+  } catch (err) {
+    errors.push(`lane registry: ${err instanceof Error ? err.message.slice(0, 150) : String(err)}`);
+  }
 
   try {
     const { id: userId } = await resolveHandle(handle);
@@ -193,7 +256,7 @@ export async function runSync(opts: {
     });
 
     if (fetched.length) {
-      const up = await upsertPosts(fetched);
+      const up = await upsertPosts(fetched, vocab);
       postsAdded = up.added;
       postsUpdated = up.updated;
 
@@ -204,6 +267,16 @@ export async function runSync(opts: {
         enriched = await enrichByIds(fetched.map((p) => p.id));
       } catch (err) {
         errors.push(`enrich: ${err instanceof Error ? err.message.slice(0, 150) : String(err)}`);
+      }
+
+      // Re-tag now that link cards exist. An article-amplifier post's body is a
+      // bare t.co, so the upsert above tagged it from nothing: the product lives
+      // in the card title ("Programmable Addresses V2: ..."). Without this the
+      // post is filed under the right pillar and feeds no lane.
+      try {
+        await retagFromCards(fetched.map((p) => p.id), vocab);
+      } catch (err) {
+        errors.push(`retag: ${err instanceof Error ? err.message.slice(0, 150) : String(err)}`);
       }
 
       // Quote posts: native quoted media resolves for free inline (see
@@ -278,6 +351,26 @@ export async function runSync(opts: {
         errors.push(`classify: ${err instanceof Error ? err.message.slice(0, 150) : String(err)}`);
       }
     }
+
+    // 4) LANE DETECTION. Classification just filed the new posts into pillars;
+    //    this asks whether any of them is about a subject the registry has no
+    //    lane for, and registers it if so. It has to run AFTER classification —
+    //    the question "is this an integration announcement with no chain" can
+    //    only be asked once the template is on the row.
+    //
+    //    Best-effort in exactly the same way classification is: a sync that
+    //    pulled posts and snapshots successfully has done its job, and a lane
+    //    that did not get drawn today gets drawn on the next run.
+    try {
+      const d = await detectLanes(sql);
+      lanes.created = d.created.length;
+      lanes.widened = d.widened.length;
+      lanes.retagged = d.retagged;
+      lanes.labels = d.created.map((l) => `${l.label} (${l.kind})`);
+      if (d.errors.length) errors.push(...d.errors.slice(0, 2).map((e) => `lanes: ${e}`));
+    } catch (err) {
+      errors.push(`lanes: ${err instanceof Error ? err.message.slice(0, 150) : String(err)}`);
+    }
   } catch (err) {
     ok = false;
     errors.push(err instanceof Error ? err.message.slice(0, 300) : String(err));
@@ -289,6 +382,8 @@ export async function runSync(opts: {
     `${postsAdded} new · ${postsUpdated} updated · ${snapshots} snapshots` +
     (enriched ? ` · ${enriched} enriched` : "") +
     (classified ? ` · ${classified} classified` : "") +
+    (lanes.created ? ` · ${lanes.created} new lane${lanes.created === 1 ? "" : "s"} (${lanes.labels.join(", ")})` : "") +
+    (lanes.retagged ? ` · ${lanes.retagged} re-tagged` : "") +
     ` · ${xReads} X reads (~$${estCost})` +
     (errors.length ? ` · ${errors.length} error(s)` : "");
 
@@ -302,5 +397,5 @@ export async function runSync(opts: {
     WHERE id = ${runId}
   `;
 
-  return { ok, postsAdded, postsUpdated, snapshots, xReads, estCostUsd: estCost, summary, errors };
+  return { ok, postsAdded, postsUpdated, snapshots, xReads, estCostUsd: estCost, summary, errors, lanes };
 }

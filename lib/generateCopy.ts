@@ -5,6 +5,7 @@ import { POSITIONING_BRIEF } from "./positioning.ts";
 import { TEMPLATE_BY_ID, type Template } from "./taxonomy.ts";
 import { chainLabel } from "./dimensions.ts";
 import { PRODUCT_BY_ID, SHAPE_BY_ID } from "./products.ts";
+import { getLaneRegistry } from "./laneRegistry.ts";
 import { sql } from "./db.ts";
 import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
@@ -455,7 +456,19 @@ function reconcileSources(
 export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption[]> {
   const def = TEMPLATE_BY_ID[input.template];
   const chain = input.chain ? chainLabel(input.chain) : null;
-  const product = input.product ? PRODUCT_BY_ID[input.product] : null;
+  // A product the code registry knows carries a hand-written brief and its
+  // guardrail. One that exists only in `lane_registry` (Migration 019) carries
+  // whatever the detector wrote — thinner, but the alternative is handing the
+  // drafter a bare product NAME, which is exactly how this pillar used to
+  // produce confident copy about things nobody had written down.
+  let product: { label: string; brief: string; guardrail?: string } | null = input.product
+    ? (PRODUCT_BY_ID[input.product] ?? null)
+    : null;
+  if (input.product && !product) {
+    const reg = await getLaneRegistry(sql);
+    const row = reg.byKind.product.find((r) => r.id === input.product);
+    if (row?.brief) product = { label: row.label, brief: row.brief, guardrail: row.guardrail ?? undefined };
+  }
   const shape = input.shape ? SHAPE_BY_ID[input.shape] : null;
   const article = input.articleId ? await loadArticle(input.articleId) : null;
   const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;

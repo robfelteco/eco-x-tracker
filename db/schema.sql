@@ -1023,3 +1023,90 @@ CREATE TABLE IF NOT EXISTS chain_momentum_sources (
   last_run   timestamptz,
   last_error text
 );
+
+-- ---------------------------------------------------------------------------
+-- Migration 019 — the LANE REGISTRY: lanes stop being a code constant.
+--
+-- The bug this fixes, in the operator's words: "Arc was recently integrated and
+-- the app did a great job of logging it in chain integrations, but we don't
+-- have a lane for Arc in the prioritize section." Same for Smart Deposits and
+-- the B2C2 integration.
+--
+-- Classification generalises — Claude read the Arc post and filed it under New
+-- Chain Integrations correctly, having never seen Arc. Dimension TAGGING did
+-- not: posts.chains is filled by matching @handles and text tokens against
+-- CHAIN_HANDLES / CHAIN_LABELS in lib/dimensions.ts, and posts.products against
+-- PRODUCT_DEFS in lib/products.ts. Both are hardcoded. A chain or product that
+-- is not already in the code gets an empty array, and every lane in Prioritize
+-- is built by unnesting those arrays (lib/stats.ts). So the post lands in the
+-- right pillar, is counted in that pillar's clock, and feeds no lane at all —
+-- the one state that looks like success and behaves like a silent drop.
+--
+-- Three of them were sitting in the table at once:
+--   Arc            integration_announcement, chains  = {}   (no `arc` id exists)
+--   Smart Deposits product_post,             products = {}   (registry has fast_deposits)
+--   B2C2           product_post,             products = {}, entities = {}
+--
+-- A lane is now a ROW. The code registries stay as the seed — they carry briefs
+-- and guardrails worth keeping under review — and this table is unioned over
+-- them, so a new lane needs no deploy. Rows written by the sync detector land
+-- with source='auto' and reviewed=false: the lane is LIVE immediately (that is
+-- the point — the operator should not have to go and switch on a lane for a
+-- chain we already announced), and it also shows up in a tray on Prioritize
+-- where it can be renamed, merged into an existing lane, or dismissed.
+--
+-- `kind` is three axes, not one:
+--   chain    — a blockchain Eco routes through. Feeds posts.chains.
+--   product  — an Eco product. Feeds posts.products.
+--   partner  — a company shipping Eco infra in their own product (B2C2, Para,
+--              LI.FI, Circle). Feeds posts.entities, and is the third axis
+--              Product Posts never had: its own description names "partners
+--              integrating Eco" as one of three flavours, and it was the only
+--              one with nothing to rotate on, so a run of partner posts kept
+--              the pillar's clock fresh while no partner had a clock of its own.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS lane_registry (
+  kind        text NOT NULL,                    -- 'chain' | 'product' | 'partner'
+  id          text NOT NULL,                    -- canonical snake_case id
+  label       text NOT NULL,                    -- display name
+  -- Matching vocabulary. `handles` is the reliable signal (@Arc → arc);
+  -- `terms` are unambiguous text tokens; `loose_terms` are ordinary English
+  -- words only matched when the post also mentions Eco (see lib/products.ts).
+  handles     text[] NOT NULL DEFAULT '{}',
+  terms       text[] NOT NULL DEFAULT '{}',
+  loose_terms text[] NOT NULL DEFAULT '{}',
+  domains     text[] NOT NULL DEFAULT '{}',
+  -- Fact sheet handed to the copy drafter. Without one the drafter knows only
+  -- the lane's NAME and writes generic infra copy — the failure the chain
+  -- pillar had before Migration 010 gave it articles.
+  brief       text,
+  guardrail   text,
+  status      text NOT NULL DEFAULT 'active',   -- 'active' | 'dismissed' | 'merged'
+  source      text NOT NULL DEFAULT 'auto',     -- 'code' | 'auto' | 'human'
+  -- false = auto-detected and not yet looked at. Live either way; this only
+  -- drives the review tray and the "auto-detected" badge on the lane.
+  reviewed    boolean NOT NULL DEFAULT false,
+  -- Where it came from, so the tray can show the post that created the lane.
+  evidence_post_id text REFERENCES posts(id) ON DELETE SET NULL,
+  evidence_note    text,                        -- the model's one-line rationale
+  -- Set when an operator folds this lane into another (Smart Deposits → Fast
+  -- Deposits, say). Tagging then writes the target id and this row stops
+  -- producing a lane of its own.
+  merged_into text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (kind, id)
+);
+CREATE INDEX IF NOT EXISTS lane_registry_review_idx ON lane_registry (reviewed, status);
+
+-- A lane the detector looked at and rejected, so the same post never costs a
+-- second Claude call on the next sync. Keyed by post, not by lane — the answer
+-- being recorded is "this post proposes nothing new".
+CREATE TABLE IF NOT EXISTS lane_detect_seen (
+  post_id    text PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+  -- Bumped when the detector's own vocabulary changes enough that a re-look is
+  -- worth paying for. Same row is simply overwritten.
+  checked_at timestamptz NOT NULL DEFAULT now(),
+  outcome    text NOT NULL,                     -- 'none' | 'existing' | 'proposed'
+  note       text
+);

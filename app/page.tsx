@@ -10,6 +10,7 @@ import {
 import { getReviewCount } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
 import { FilterBar } from "@/app/components/FilterBar";
+import LaneTray from "@/app/components/LaneTray";
 import { parseFilter } from "@/lib/filter";
 import { Eyebrow, Badge, Thumb, Tooltip } from "@/app/components/ui";
 import { writtenDate, daysAgo, compact } from "@/lib/format";
@@ -84,6 +85,7 @@ export default async function PrioritizePage({
       curriculum,
       dmvLanes,
       angleBank,
+      pendingLanes,
     },
     reviewCount,
   ] = await Promise.all([getInsights(filter), getReviewCount()]);
@@ -104,6 +106,10 @@ export default async function PrioritizePage({
         <div className="mt-4">
           <FilterBar />
         </div>
+
+        {/* Lanes the last sync drew for subjects that had none. They are already
+            live in the pillars below; this is where a wrong one gets corrected. */}
+        <LaneTray lanes={pendingLanes} />
 
         {recentChains.length > 0 && (
           <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
@@ -207,6 +213,7 @@ function buildActions(
   mode: DraftMode;
   targets: Target[];
   products?: ProductGroup[];
+  partners?: ProductGroup[];
   lanes?: LaneGroup[];
   docsMeta?: DocsMeta;
   videosMeta?: VideosMeta;
@@ -250,7 +257,39 @@ function buildActions(
         },
       ],
     }));
-    return { mode, targets: [], products };
+    // The third axis. A partner lane has no article shelf — Eco does not publish
+    // a piece per partner — so it offers the one evergreen target and leans on
+    // the lane's brief for grounding. "Never posted" is the state worth seeing:
+    // a registered partner with a zero count is a signed integration nobody has
+    // written about.
+    const partners: ProductGroup[] = rec.partners.map((p) => ({
+      key: `partner-${p.partner}`,
+      product: p.partner,
+      label: p.label,
+      sublabel:
+        p.count === 0
+          ? "Never posted in this pillar — nothing has been written about this integration"
+          : `${compact(p.medianImpr)} median impr · ${p.count} post${p.count === 1 ? "" : "s"} · ${
+              p.daysSince == null ? "never used" : `last ${daysAgo(p.daysSince)}`
+            }`,
+      readiness: p.readiness,
+      shapes: p.shapes,
+      autoDetected: p.autoDetected,
+      brief: p.brief,
+      targets: [
+        {
+          key: `partner-${p.partner}-evergreen`,
+          label: `${p.label} angle`,
+          sublabel: p.brief
+            ? "Draft from the partnership itself — the lane's brief is the grounding"
+            : "No brief on this lane yet — add one before drafting",
+          angle: `${p.label} partner angle`,
+          basePostText: null,
+        },
+      ],
+    }));
+
+    return { mode, targets: [], products, partners };
   }
 
   if (mode === "discovery") {
@@ -793,6 +832,7 @@ function RecCard({
     mode,
     targets,
     products,
+    partners,
     lanes,
     docsMeta,
     videosMeta,
@@ -868,6 +908,7 @@ function RecCard({
         mode={mode}
         targets={targets}
         products={products}
+        partners={partners}
         lanes={lanes}
         docsMeta={docsMeta}
         videosMeta={videosMeta}
