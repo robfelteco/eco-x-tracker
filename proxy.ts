@@ -14,6 +14,8 @@ import { auth } from "@/auth";
 // check silently kills the crons, and it fails in a way that looks like success:
 // the cron gets a 302 to the sign-in page and Vercel records a 2xx. /api/sweep
 // hit exactly that on its first production call, which is why it is listed here.
+// /api/channels (and /api/channels/transcribe) hit it too and went unnoticed
+// from 2 Sep to 15 Oct: the podcast lane silently stopped growing.
 export default auth((req) => {
   if (!req.auth) {
     const url = new URL("/api/auth/signin", req.nextUrl.origin);
@@ -24,6 +26,6 @@ export default auth((req) => {
 
 export const config = {
   matcher: [
-    "/((?!api/auth|api/sync|api/sweep|denied|_next/static|_next/image|favicon.ico|fonts|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
+    "/((?!api/auth|api/sync|api/sweep|api/channels|denied|_next/static|_next/image|favicon.ico|fonts|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
   ],
 };
