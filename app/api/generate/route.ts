@@ -32,7 +32,7 @@ function toId(v: unknown): number | null {
 // the other write endpoints; tightens once @eco.com auth lands.
 export async function POST(req: NextRequest) {
   try {
-    const { template, chain, product, articleId, docPageId, videoId, analogId, sourceId, eduShape, shape, angle, basePostText, priorTexts } =
+    const { template, chain, product, articleId, docPageId, videoId, analogId, sourceId, eduCandidateId, eduShape, shape, angle, basePostText, priorTexts } =
       await req.json();
     if (!isTemplate(template)) {
       return NextResponse.json({ ok: false, error: "a valid template is required" }, { status: 400 });
@@ -50,6 +50,9 @@ export async function POST(req: NextRequest) {
       // failing source cannot take down the whole click. Server-side fan-out
       // would also put N sequential model calls inside a single 60s function.
       sourceId: toId(sourceId),
+      // A Broad Educational pipeline candidate (lib/eduIntake.ts). Carries its
+      // own scraped source and its operator-edited frame.
+      eduCandidateId: toId(eduCandidateId),
       eduShape: typeof eduShape === "string" && eduShape ? eduShape : null,
       shape: typeof shape === "string" && shape ? shape : null,
       angle: typeof angle === "string" && angle ? angle.slice(0, 500) : null,

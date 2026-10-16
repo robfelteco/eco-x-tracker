@@ -9,7 +9,8 @@ import { getLaneRegistry } from "./laneRegistry.ts";
 import { sql } from "./db.ts";
 import { getDocPage } from "./docs.ts";
 import { getVideo, speakerLabel } from "./videos.ts";
-import { ICP_BY_ID } from "./icp.ts";
+import { ICP_BY_ID, SITE_AUDIENCE_BY_ID } from "./icp.ts";
+import { getEduCandidate, themeLabel, type EduCandidate } from "./eduIntake.ts";
 import { ANALOG_BY_ID, SHAPE_BY_ID as EDU_SHAPE_BY_ID, TIER_LABEL as ANALOG_TIER_LABEL } from "./analogs.ts";
 import { sourcesForDrafting, getSourceById, getSourceText, type AnalogSource } from "./analogSources.ts";
 import {
@@ -167,6 +168,14 @@ export interface GenerateCopyInput {
   // selection belongs to the operator, one click per source, not to a model
   // silently resolving a shortlist.
   sourceId?: number | null;
+  // ONE row from edu_candidates (lib/eduIntake.ts). When set, this is a
+  // Broad Educational post drafted off the pipeline: the candidate's scraped
+  // text is the pinned source, its pre-filled frame / mechanism / bridge are
+  // the steer, and its analog_id (when the body actually carries the concept)
+  // brings the curriculum's parallel and break along. Same grounding gates as
+  // the curriculum path, because the failure they exist for, a confident
+  // claim the source never makes, is identical for news.
+  eduCandidateId?: number | null;
   // Which teaching shape to take (EDUCATION_SHAPES). Curriculum posts only —
   // the seven product shapes don't apply to a concept explainer.
   eduShape?: string | null;
@@ -473,7 +482,43 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   const article = input.articleId ? await loadArticle(input.articleId) : null;
   const docPage = input.docPageId ? await getDocPage(input.docPageId) : null;
   const video = input.videoId ? await getVideo(input.videoId) : null;
-  const analog = input.analogId ? ANALOG_BY_ID[input.analogId] : null;
+  // The pipeline candidate, when this draft comes off the Broad Educational
+  // board. Loaded first because it can supply BOTH the concept and the source.
+  const candidate = input.eduCandidateId ? await getEduCandidate(input.eduCandidateId) : null;
+  if (input.eduCandidateId && !candidate) {
+    throw new Error(`Candidate #${input.eduCandidateId} is not in the pipeline any more. Reload the board.`);
+  }
+  if (candidate && !candidate.rawDocumentId) {
+    throw new Error(
+      `"${candidate.headline.slice(0, 60)}" was never scraped, so there is no text to argue from or to check a draft ` +
+        `against. Intake could not read ${candidate.sourceUrl}; try Run intake now once the page is reachable, or skip it.`,
+    );
+  }
+  // `let`, not `const`: a candidate's concept tag came from detectAnalog() on
+  // the headline, and the body may not carry the concept at all. In that case
+  // the draft falls back to the news lane below rather than failing.
+  let analog = input.analogId ? ANALOG_BY_ID[input.analogId] : candidate?.analogId ? ANALOG_BY_ID[candidate.analogId] : null;
+  // A candidate is handed to the rest of this function as a pinned source,
+  // shaped like an analog_sources row, so every gate below applies unchanged.
+  const candidateSource: AnalogSource | null = candidate
+    ? {
+        id: -candidate.id,
+        analogId: analog?.id ?? "",
+        title: candidate.sourceTitle || candidate.headline,
+        publisher: candidate.publisher,
+        url: candidate.sourceUrl,
+        kind: "article",
+        publishedOn: candidate.publishedAt ? candidate.publishedAt.slice(0, 10) : null,
+        summary: candidate.summary,
+        keyFacts: candidate.keyStat ? [candidate.keyStat] : [],
+        verified: true,
+        sourceOf: "edu_candidate",
+        tier: "current",
+        factsSource: "body",
+        textDocId: candidate.rawDocumentId,
+        ageDays: candidate.ageDays,
+      }
+    : null;
   // Verified source material for this concept. Two shapes:
   //
   //   sourceId set  ->  exactly that row. The operator clicked "Draft from this"
@@ -486,7 +531,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   //
   // A curriculum draft is not allowed to proceed without material either way,
   // see the throw below.
-  const pinnedSource = analog && input.sourceId ? await getSourceById(input.sourceId, analog.id) : null;
+  const pinnedSource = candidateSource ?? (analog && input.sourceId ? await getSourceById(input.sourceId, analog.id) : null);
   if (analog && input.sourceId && !pinnedSource) {
     throw new Error(
       `Source ${input.sourceId} is not a verified source for "${analog.label}" any more — it may have expired ` +
@@ -500,7 +545,8 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
       : [];
   const eduShape = input.eduShape ? EDU_SHAPE_BY_ID[input.eduShape] : null;
   // An analog concept names its own ICPs; the first is the primary reader.
-  const icpId = docPage?.icp ?? video?.icp ?? analog?.icps[0] ?? null;
+  const audience = candidate?.audience ? SITE_AUDIENCE_BY_ID[candidate.audience] : null;
+  const icpId = docPage?.icp ?? video?.icp ?? audience?.icps[0] ?? analog?.icps[0] ?? null;
   const icp = icpId ? ICP_BY_ID[icpId] : null;
 
   // No source, no draft. Rob's rule: "we can't just yolo copy without any
@@ -543,10 +589,14 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   // ungrounded row left in the shortlist is an ungrounded draft waiting to be
   // chosen, and it would arrive with no text to verify against.
   const grounded: { source: AnalogSource; body: string; windows: ReturnType<typeof selectWindows> }[] = [];
-  if (analog) {
+  if (analog || candidate) {
     // Per-source window budget: one pinned source can afford the whole budget,
     // a shortlist has to share it or the prompt bloats past the CLI's ceiling.
     const budgetChars = pinnedSource ? 7000 : 2600;
+    // Retrieval vocabulary. A concept's own term list when teaching one; the
+    // candidate's headline, stat and evidence otherwise, so the passages shown
+    // are the ones the frame rests on rather than the page's first screen.
+    const terms = analog ? (analog.vocab ?? []) : candidateTerms(candidate!);
     for (const s of analogSources) {
       const text = await getSourceText(s);
       if (!text) continue;
@@ -557,7 +607,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
         // term list decides which passages the model sees, so a 55k-char
         // transcript contributes the parts that bear on the concept instead of
         // its first four minutes.
-        windows: selectWindows(text.body, analog.vocab ?? [], {
+        windows: selectWindows(text.body, terms, {
           budgetChars,
           segments: (text.segments as TimedSegment[] | null) ?? null,
         }),
@@ -565,7 +615,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     }
     if (!grounded.length) {
       throw new Error(
-        `None of the ${analogSources.length} verified source(s) for "${analog.label}" have been ingested, so ` +
+        `None of the ${analogSources.length} verified source(s) for "${analog?.label ?? candidate?.headline ?? "this post"}" have been ingested, so ` +
           `there is nothing to argue from and nothing to check a draft against. Run ` +
           `scripts/ingest-analog-sources.ts (web pages) or scripts/sweep-channels.ts (podcasts) first.`,
       );
@@ -577,7 +627,19 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   // payments podcast that never mentions netting. Drop those rather than let
   // the model bridge the gap from its own priors — and if that empties the
   // list, say so plainly instead of drafting anyway.
-  const onTopic = grounded.filter((g) => sourceCarriesConcept(g.windows));
+  let onTopic = grounded.filter((g) => sourceCarriesConcept(g.windows));
+  // A pipeline candidate tagged with a concept the piece does not actually
+  // discuss is not a failed draft, it is a news post. detectAnalog() matched a
+  // word in the headline; the body is the evidence, and it says otherwise. So
+  // drop the concept and retrieve on the candidate's own terms instead.
+  if (candidate && analog && !onTopic.length) {
+    console.warn(`[generateCopy] candidate #${candidate.id}: body never uses "${analog.label}" vocabulary; drafting as news`);
+    analog = null;
+    const terms = candidateTerms(candidate);
+    for (const g of grounded) g.windows = selectWindows(g.body, terms, { budgetChars: 7000 });
+  }
+  // News has no concept to carry: whatever the retrieval found is the evidence.
+  if (candidate && !analog) onTopic = grounded;
   if (analog && !onTopic.length) {
     const names = grounded.map((g) => `"${g.source.title}"`).slice(0, 3).join(", ");
     throw new Error(
@@ -916,6 +978,16 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
         ? `No shape requested — pick the one this concept best supports and name it in the rationale.`
         : null,
 
+    // The pipeline's framing block, both lanes. The operator READ these fields
+    // and edited them before clicking Draft (Jay: the frame step stays human),
+    // so they outrank anything the model would infer from the piece.
+    candidate ? candidateFrameBlock(candidate, audience?.label ?? null) : null,
+
+    // The news-lane source block. The curriculum block above carries the
+    // passages when a concept is in play; without one this is the ONLY place
+    // the model sees the piece, and the same claims contract applies.
+    candidate && !analog && candidateSource ? candidateSourceBlock(candidateSource, sourceWindows) : null,
+
     shape ? `SHAPE requested: ${shape.label} — ${shape.brief}` : null,
     input.angle ? `Operator's steer: ${input.angle}` : null,
 
@@ -932,7 +1004,7 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
     ANTI_SLOP_BRIEF,
     "",
     "Return 2-3 distinct starting-point drafts as STRICT JSON only, no prose, no code fences:",
-    analog
+    analog || candidate
       ? `[{"angle": "<short label>", "text": "<the draft post, link included>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP, why this hook, which source claim it rests on>", "sourceTitle": "<the source you used>", "sourceUrl": "<its URL, copied exactly>", "claims": [{"claim": "<the assertion as written in your post>", "sourceQuote": "<the passage it rests on, copied VERBATIM from the passages above>"}], "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`
       : `[{"angle": "<short label>", "text": "<the draft post>", "band": "<tight|mid|long>", "rationale": "<one line: which ICP + pillar, why this hook>", "score": <0-100>, "scoreNote": "<one line: the weakest dimension>"}]`,
     // The band contract is repeated at the very end because it is the instruction
@@ -952,12 +1024,93 @@ export async function generateCopy(input: GenerateCopyInput): Promise<CopyOption
   // verified row for the concept. An ungrounded source was filtered out
   // upstream; letting a citation resolve back to one would re-attach the exact
   // "cited a piece we never read" property the gate exists to remove.
-  const citable = analog ? onTopic.map((g) => g.source) : analogSources;
+  const citable = analog || candidate ? onTopic.map((g) => g.source) : analogSources;
   const options = reconcileSources(await runBackend(context), citable, pinnedSource);
   // An article-backed post carries the piece's own link, never a marketing page
   // the model reached for. Curriculum posts keep their own reconcile pass.
   const linked = article?.shareUrl ? enforceLink(options, article.shareUrl, article.title) : options;
   return polish(linked, citable, pinnedSource, recency, verifyCorpus || null);
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline candidates (lib/eduIntake.ts).
+// ---------------------------------------------------------------------------
+
+const STOP = new Set([
+  "about", "after", "again", "against", "among", "because", "before", "being", "below", "between", "could",
+  "during", "every", "first", "from", "further", "having", "here", "into", "more", "most", "other", "over",
+  "same", "should", "since", "some", "still", "such", "than", "that", "their", "there", "these", "they",
+  "this", "those", "through", "under", "until", "very", "what", "when", "where", "which", "while", "with",
+  "would", "while", "stablecoin", "stablecoins", "crypto", "market", "markets", "report", "says", "year",
+]);
+
+// Retrieval terms for a news candidate: the content words of the headline,
+// stat and evidence, plus any number in them. Deliberately crude. The point is
+// to pull the passages the frame rests on, and the claims check afterwards is
+// what guarantees correctness, not this.
+function candidateTerms(c: EduCandidate): string[] {
+  const text = [c.headline, c.keyStat ?? "", c.evidence ?? "", c.frame ?? ""].join(" ").toLowerCase();
+  const words = text.match(/[a-z][a-z-]{4,}/g) ?? [];
+  const numbers = text.match(/\d[\d,.]*\s?(?:%|bn|billion|million|trillion|[kmbt]\b)?/g) ?? [];
+  const out = new Set<string>();
+  for (const w of words) if (!STOP.has(w)) out.add(w);
+  for (const n of numbers) if (n.replace(/\D/g, "").length >= 2) out.add(n.trim());
+  return [...out].slice(0, 30);
+}
+
+function candidateFrameBlock(c: EduCandidate, audienceLabel: string | null): string {
+  return [
+    `THE FRAME (set by the operator from the pipeline; this is the post's spine):`,
+    c.frame ? `  Frame: ${c.frame}` : null,
+    c.mechanism ? `  Mechanism being explained: ${c.mechanism}` : null,
+    c.ecoBridge
+      ? `  What the reader should infer (never state, never name Eco): ${c.ecoBridge}`
+      : `  No Eco bridge was set. Write the post so the reader finishes smarter about the mechanism, and stop there.`,
+    c.evidence ? `  The fact the post rests on: ${c.evidence}` : null,
+    audienceLabel ? `  Written for: ${audienceLabel}` : null,
+    c.theme ? `  Theme it implies: ${themeLabel(c.theme)}` : null,
+    `Honour the frame. If the source passages cannot carry it, say so in the rationale and draft the`,
+    `nearest post the passages DO support, rather than keeping the frame and inventing the support.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// The news-lane equivalent of the curriculum source block: one piece, its
+// passages, and the same claims contract. Written separately rather than
+// forcing the curriculum block to handle "no concept", because that block's
+// instructions are about separating OUR thesis from THEIR text, and a news
+// post has no thesis of ours to separate.
+function candidateSourceBlock(src: AnalogSource, windows: ReturnType<typeof selectWindows>): string {
+  return [
+    `THE SOURCE — this post reports on this ONE piece and links to it.`,
+    `  ${src.title}`,
+    src.publisher ? `  Publisher: ${src.publisher}${src.publishedOn ? ` (${src.publishedOn})` : ""}` : null,
+    `  URL: ${src.url}`,
+    src.summary ? `  What it says: ${src.summary}` : null,
+    ``,
+    windows.length
+      ? [
+          `SOURCE PASSAGES — the actual text, retrieved on the frame's own terms. This is the ONLY`,
+          `evidence you have about what the piece says; you have not read the rest of it.`,
+          ``,
+          ...windows.map((w, i) => `[P${i + 1}]${w.hits.length ? ` (mentions: ${w.hits.join(", ")})` : ""}\n"""${w.text}"""`),
+        ].join("\n")
+      : null,
+    ``,
+    `HOW TO USE IT:`,
+    `  * Lead with the fact: a named institution, one number, then the so-what in one line.`,
+    `  * Every number, name and quote in your draft must appear in the passages above. If the`,
+    `    passages do not state it, the piece does not state it. Drop the claim, not the standard.`,
+    `  * RETURN A "claims" ARRAY: every factual assertion you attribute to the piece, with`,
+    `    "sourceQuote" copied VERBATIM from the passages (roughly 10-30 words). These are checked`,
+    `    mechanically; a paraphrased or invented sourceQuote fails and the draft is dropped.`,
+    `  * PUT THE LINK IN THE POST BODY, on its own line, copied EXACTLY: ${src.url}`,
+    `  * Return this piece in "sourceTitle" and "sourceUrl". They are fixed, not a choice.`,
+    `  * All drafts share this one piece, so make them differ on ANGLE and LENGTH, not wording.`,
+  ]
+    .filter((l): l is string => l !== null)
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
