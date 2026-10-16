@@ -16,6 +16,9 @@ import { auth } from "@/auth";
 // hit exactly that on its first production call, which is why it is listed here.
 // /api/channels (and /api/channels/transcribe) hit it too and went unnoticed
 // from 2 Sep to 15 Oct: the podcast lane silently stopped growing.
+// /api/edu-intake is the same shape (nightly cron, CRON_SECRET) and is listed
+// for the same reason; it additionally accepts a signed-in session itself, for
+// the "Run intake now" button, so exempting it here loses nothing.
 export default auth((req) => {
   if (!req.auth) {
     const url = new URL("/api/auth/signin", req.nextUrl.origin);
@@ -26,6 +29,6 @@ export default auth((req) => {
 
 export const config = {
   matcher: [
-    "/((?!api/auth|api/sync|api/sweep|api/channels|denied|_next/static|_next/image|favicon.ico|fonts|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
+    "/((?!api/auth|api/sync|api/sweep|api/channels|api/edu-intake|denied|_next/static|_next/image|favicon.ico|fonts|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
   ],
 };

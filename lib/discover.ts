@@ -23,6 +23,11 @@ export interface DiscoveredItem {
   contentType: string; // suggested format: "article" | "data/chart" | "short video" | "thread"
   icp: string; // one of SITE_AUDIENCES ids (lib/icp.ts)
   source: DiscoverSource;
+  // Which lens produced it ("market-data" | "company-moves" | "policy-infra").
+  // The intake pipeline persists this as the candidate's origin, so the inbox
+  // can say where an idea came from and a lens that only ever produces skips
+  // becomes visible.
+  lens?: string;
 }
 
 const ECO_BRIEF = `${ECO_ONE_LINER} Broad-educational posts are TOP-OF-FUNNEL: the market story carries the post and Eco's relevance rides in by implication, Eco is NOT named in the body. The reader should finish smarter about the stablecoin market.
@@ -130,7 +135,7 @@ async function grokLens(
       typeof o === "object" && o !== null && (o as { type?: string }).type === "message",
   );
   const block = message?.content?.find((c) => c.type === "output_text");
-  return parseItems(block?.text ?? "").map((c) => ({ ...c })).slice(0, count);
+  return parseItems(block?.text ?? "").map((c) => ({ ...c, lens: lens.id })).slice(0, count);
 }
 
 export interface DiscoverResult {

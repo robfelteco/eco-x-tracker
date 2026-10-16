@@ -1110,3 +1110,105 @@ CREATE TABLE IF NOT EXISTS lane_detect_seen (
   outcome    text NOT NULL,                     -- 'none' | 'existing' | 'proposed'
   note       text
 );
+
+-- ---------------------------------------------------------------------------
+-- Migration 020 — EDU CANDIDATES: Broad Educational becomes a pipeline.
+--
+-- Phase 2 of docs/BROAD-ED-REDESIGN.md. The Broad Educational card had three
+-- surfaces that did not feed each other: an angle bank nobody filled (zero rows
+-- in six weeks), a four-tier curriculum accordion built for one deep mechanism
+-- post, and a Discover button whose results vanished on reload. Nothing carried
+-- forward, so the "4" of the 4-1-1 ran at 8% of main posts.
+--
+-- One table, one path. Every row is a CANDIDATE for an educational post and it
+-- moves left to right:
+--
+--   inbox   — stocked nightly by /api/edu-intake from the Grok lenses and the
+--             current-tier analog sources. Already scraped, deduped, scored for
+--             adjacency to what eco.com says Eco is, and PRE-FRAMED: the model
+--             drafts the four angle-bank fields so the operator edits a frame
+--             instead of staring at seven blank inputs.
+--   picked  — the human step Jay asked to keep. The operator read the frame,
+--             fixed the bridge, set the audience. The picked column IS the
+--             angle bank now; education_angles stays as a table but nothing
+--             writes to it any more.
+--   drafted — generateCopy ran against the scraped text with the frame and
+--             bridge as its steer. The three bands persist in `drafts` so a
+--             reload cannot lose them (the Discover button's failure).
+--   posted  — the operator marked it, and the next sync matches the @eco post
+--             by resolved URL and writes used_post_id (lib/eduIntake.ts).
+--   skipped — remembered forever, so the same URL never comes back from a
+--             later intake run. A skip is information, not a delete.
+--
+-- Dedupe key: the NORMALISED source URL (lowercase host, no scheme, no utm,
+-- no trailing slash). Grok and the sweep both surface the same piece with
+-- different tracking params, and a tracked URL is not a new candidate.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS edu_candidates (
+  id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- What it is.
+  headline         text NOT NULL,            -- the post angle / hook, one line
+  summary          text,                     -- 1-3 sentences of facts + so-what
+  key_stat         text,                     -- the single most quotable number
+  source_url       text NOT NULL,
+  source_key       text NOT NULL,            -- normalised source_url, the dedupe key
+  source_title     text,
+  publisher        text,
+  published_at     timestamptz,
+  -- Where it came from: 'grok:market-data' | 'grok:company-moves' |
+  -- 'grok:policy-infra' | 'analog_source' | 'manual'.
+  origin           text NOT NULL,
+  -- The scraped piece, in raw_documents. NULL means the scrape failed; the
+  -- card says so and Draft is disabled, because the grounding gates in
+  -- lib/generateCopy.ts need text to check claims against.
+  raw_document_id  bigint REFERENCES raw_documents(id) ON DELETE SET NULL,
+  -- lib/analogs.ts concept id, via detectAnalog(), when a mechanism is in play.
+  analog_id        text,
+  -- SITE_AUDIENCES id (lib/icp.ts), one of the six eco.com audiences.
+  audience         text,
+  -- 0-100 against the eco.com themes (design doc §2), with the one-line reasons
+  -- the pillar score already uses as its contract.
+  adjacency_score  integer NOT NULL DEFAULT 0,
+  adjacency_reasons text[] NOT NULL DEFAULT '{}',
+  -- Which eco.com theme the piece implies: fragmentation | pre_funding |
+  -- all_or_nothing | programmable_rules | tokenized_assets | at_par | agents.
+  theme            text,
+  -- The four angle-bank fields, PRE-FILLED by the intake model and edited by
+  -- the operator. Never auto-picked (Jay: the FRAME step stays human).
+  frame            text,
+  mechanism        text,
+  eco_bridge       text,
+  evidence         text,
+  status           text NOT NULL DEFAULT 'inbox',  -- inbox | picked | drafted | posted | skipped
+  -- generateCopy's CopyOption[] as returned, so the three bands survive a reload.
+  drafts           jsonb,
+  drafted_at       timestamptz,
+  -- Set by the operator (Mark posted) or by sync-time URL matching.
+  used_post_id     text REFERENCES posts(id) ON DELETE SET NULL,
+  posted_at        timestamptz,
+  picked_at        timestamptz,
+  skipped_at       timestamptz,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS edu_candidates_source_key_uidx ON edu_candidates (source_key);
+CREATE INDEX IF NOT EXISTS edu_candidates_queue_idx ON edu_candidates (status, adjacency_score DESC);
+CREATE INDEX IF NOT EXISTS edu_candidates_analog_idx ON edu_candidates (analog_id) WHERE analog_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS edu_candidates_used_post_idx ON edu_candidates (used_post_id) WHERE used_post_id IS NOT NULL;
+
+-- When intake last ran and what it did, so the card can say "stocked 6h ago,
+-- 11 new" instead of leaving the operator to guess whether the cron is alive.
+CREATE TABLE IF NOT EXISTS edu_intake_runs (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  started_at    timestamptz NOT NULL DEFAULT now(),
+  finished_at   timestamptz,
+  trigger       text NOT NULL,                -- 'cron' | 'manual'
+  scanned       integer NOT NULL DEFAULT 0,   -- candidates seen across every feed
+  added         integer NOT NULL DEFAULT 0,   -- new inbox rows
+  deduped       integer NOT NULL DEFAULT 0,   -- dropped: already posted or already a candidate
+  scrape_failed integer NOT NULL DEFAULT 0,
+  credits       integer NOT NULL DEFAULT 0,   -- Firecrawl credits spent
+  warnings      text[] NOT NULL DEFAULT '{}',
+  error         text
+);
+CREATE INDEX IF NOT EXISTS edu_intake_runs_started_idx ON edu_intake_runs (started_at DESC);
