@@ -48,7 +48,46 @@ export interface TemplateDef {
   // Per-template staleness threshold (days). The overview page flags a template
   // red once days-since-last-post exceeds this. Tunable per pillar cadence.
   staleDays: number;
+  // Which side of the 4-1-1 this pillar lands on (see RATIO_BUCKETS below).
+  // Declared per pillar rather than inferred from "does it mention Eco", because
+  // a quote card can be an external voice (edu) or an Eco event (soft) and the
+  // call is editorial. `null` keeps a pillar out of the meter entirely.
+  ratioBucket: RatioBucket | null;
 }
+
+// ---------------------------------------------------------------------------
+// The 4-1-1. Four educational posts for every soft promo and every hard promo.
+//
+// The pillar scorer measures each pillar against its own cadence, which cannot
+// see the ratio at all: every pillar can be "fresh" while the account runs
+// 80% promo, which is what it ran for the 60 days before this went in (16
+// educational of 85 main posts). The buckets are what the week strip on
+// Prioritize counts, and what the deficit is computed from.
+//
+// Data Motion Visual is the one pillar that straddles: a market-wide visual
+// (no chain as its subject) is educational, a chain visual is a soft promo for
+// an integration. lib/ratio.ts splits it per post on `chains`, which is the
+// same rule lib/dmvLanes.ts uses to lane them.
+// ---------------------------------------------------------------------------
+export type RatioBucket = "edu" | "soft" | "hard";
+
+export const RATIO_BUCKETS: Record<RatioBucket, { label: string; target: number; hint: string }> = {
+  edu: {
+    label: "Educational",
+    target: 4,
+    hint: "Content the audience would read if Eco did not exist: external market news, mechanism explainers, outside voices.",
+  },
+  soft: {
+    label: "Soft promo",
+    target: 1,
+    hint: "Eco is in the frame but the post is still worth something on its own: a clip, an essay, a docs walkthrough.",
+  },
+  hard: {
+    label: "Hard promo",
+    target: 1,
+    hint: "The post exists to announce or sell: a product, an integration, a partner.",
+  },
+};
 
 export const TEMPLATE_DEFS: TemplateDef[] = [
   {
@@ -58,6 +97,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Animated/motion video presenting market data, charts, or stats (usually stablecoin market numbers). Media is video or GIF; content is a data visualization, not a person or a product demo.",
     draftMode: "dmv",
     staleDays: 10,
+    ratioBucket: "soft",
   },
   {
     id: "integration_announcement",
@@ -66,6 +106,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "A new BLOCKCHAIN going live in Eco — Eco Routes expanding coverage to a chain. The chain is the subject of the announcement. Signals: 'Eco now supports @chain', 'Eco is live on @chain', 'expanding coverage to <chain>', 'Routes is live on <chain>', chain stats used to justify the integration. NOT a company/partner integrating an Eco product into their own app (that is product_post), and NOT third-party market news about a chain (that is broad_educational).",
     draftMode: "chains",
     staleDays: 14,
+    ratioBucket: "hard",
   },
   {
     id: "quote_card",
@@ -74,6 +115,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Static image containing a large pulled quote with speaker attribution (name/title/company on the card). Copy typically introduces the speaker and gestures at the quote.",
     draftMode: "discovery",
     staleDays: 14,
+    ratioBucket: "edu",
   },
   {
     id: "product_post",
@@ -82,6 +124,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Eco product content, in three flavours: (1) PRODUCT RELEASES — a new Eco product or feature shipping; (2) PRODUCT EDUCATION — how a product works, the problem it solves, architecture diagrams, lifecycle explainers, demo footage, eco.com/blog product articles; (3) PARTNERS INTEGRATING ECO infra/products into their own apps (e.g. Para shipping Permit3, LI.FI/Jumper routing through Eco, Circle Gateway powering Eco order size). Signals: Eco product names (Routes, Verified Liquidity, Programmable Addresses, Permit3, Flash Intents, Fast Deposits), eco.com/blog product URLs, architecture diagrams, in-app demo footage, '<partner> integrated <Eco product>'. A partner/company integration belongs HERE — the chain bucket is only for new blockchains going live in Eco.",
     draftMode: "products",
     staleDays: 10,
+    ratioBucket: "hard",
   },
   {
     id: "thought_leadership",
@@ -90,6 +133,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Long-form opinion/perspective articles or posts, often from or featuring our CEO. Essay-like text or links to op-ed style pieces. Includes the many re-amplification posts that point back at an article already published — the tracker groups those by their underlying article rather than counting each as a new piece.",
     draftMode: "articles",
     staleDays: 14,
+    ratioBucket: "soft",
   },
   {
     id: "dev_doc_post",
@@ -98,6 +142,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Posts driving to developer documentation. Signals: links to docs.eco.com, code snippets, developer-facing language. Optional sub-tag: soft_sell vs hard_sell.",
     draftMode: "docs",
     staleDays: 14,
+    ratioBucket: "soft",
   },
   {
     id: "broad_educational",
@@ -105,7 +150,11 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
     description:
       "External stablecoin-market content that never mentions Eco: external articles, external X articles, short clips about what's happening in the stablecoin space. Signals: external link domains, zero Eco/product mentions, market-commentary framing.",
     draftMode: "discovery",
-    staleDays: 10,
+    // Was 10, which told the board one post per ten days was healthy and kept
+    // the "4" of the 4-1-1 off the top of Prioritize. At ~10 main posts a week
+    // the ratio needs six or seven of these a week, so the cadence is days.
+    staleDays: 2,
+    ratioBucket: "edu",
   },
   {
     id: "short_form_video_eco",
@@ -114,6 +163,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Short-form video featuring Eco (talking-head clips, event clips, explainers where Eco is named or shown). Distinct from data_motion_visual (data animation) and from product demo videos (which are product_post).",
     draftMode: "videos",
     staleDays: 14,
+    ratioBucket: "soft",
   },
   {
     id: "other",
@@ -122,6 +172,7 @@ export const TEMPLATE_DEFS: TemplateDef[] = [
       "Doesn't fit any bucket. Surfaces in the review queue so we can decide whether the taxonomy needs a new bucket.",
     draftMode: "generic",
     staleDays: 9999,
+    ratioBucket: null,
   },
 ];
 

@@ -6,6 +6,7 @@ import { NestedDisclosure } from "@/app/components/Collapse";
 import { useRouter } from "next/navigation";
 import { QuoteDiscovery } from "./QuoteDiscovery";
 import { AngleBank } from "./AngleBank";
+import { siteAudienceLabel } from "@/lib/icp";
 import type { AngleBank as Bank } from "@/lib/angleBank";
 
 // One unified action surface per recommendation.
@@ -543,7 +544,7 @@ export function RecActions({
           (data.items ?? []).map((it: Record<string, unknown>, i: number) => ({
             key: `disc-${i}`,
             label: String(it.headline ?? ""),
-            sublabel: [it.keyStat, it.contentType, it.icp].filter(Boolean).join(" · "),
+            sublabel: [it.keyStat, it.contentType, siteAudienceLabel(String(it.icp ?? ""))].filter(Boolean).join(" · "),
             chain: null,
             angle: String(it.headline ?? ""),
             basePostText: [it.summary, it.source && (it.source as { url?: string }).url ? `Source: ${(it.source as { url: string }).url}` : ""]

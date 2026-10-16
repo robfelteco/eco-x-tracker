@@ -105,6 +105,81 @@ export const ICP_DEFS: IcpDef[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// The six audiences eco.com names (relaunch, Oct 2026). "Who uses Eco" on the
+// site is six solution pages, and they are the audience list the educational
+// lane should pick from: an educational post is written for one of these
+// readers, not for "institutional" or "developer", which is what the angle bank
+// and the discover prompt offered before and which maps to nothing on the site.
+//
+// Kept separate from ICP_DEFS above rather than replacing it: the nine docs
+// personas are still how the Dev Doc shelf groups, and they are finer than the
+// site's six. `icps` says which docs personas each site audience folds in, so
+// anything keyed on the old ids can be rolled up without a migration.
+// ---------------------------------------------------------------------------
+export interface SiteAudience {
+  id: string;
+  label: string;
+  /** The ICP_DEFS ids this audience covers. */
+  icps: string[];
+  /** What this reader wants from an educational post, per the site's own page. */
+  brief: string;
+}
+
+export const SITE_AUDIENCES: SiteAudience[] = [
+  {
+    id: "payment_treasury",
+    label: "Payment & Treasury Platforms",
+    icps: ["payments", "treasury"],
+    brief:
+      "Settlement, intraday liquidity, pre-funding, off-hours yield. Reads correspondent banking, nostro, netting and T+1 as their own problems.",
+  },
+  {
+    id: "asset_issuers",
+    label: "Asset Issuers",
+    icps: ["issuers"],
+    brief: "Stablecoin and tokenized-asset issuers: distribution across chains, at-par conversion, primary-market access, reserve and redemption mechanics.",
+  },
+  {
+    id: "trading_platforms",
+    label: "Trading Platforms",
+    icps: ["exchanges", "solvers"],
+    brief: "Exchanges, onramps, OTC and solvers: order types beyond swap-with-slippage, venue neutrality, best execution, signed quotes.",
+  },
+  {
+    id: "wallet_platforms",
+    label: "Wallet Platforms",
+    icps: ["wallets"],
+    brief: "Consumer and business wallets: 1:1 stablecoin UX, gasless flows, deposit addresses, the friction their users drop at.",
+  },
+  {
+    id: "onchain_builders",
+    label: "Onchain Builders",
+    icps: ["builders", "protocols"],
+    brief: "Developers and protocol teams: mechanism depth, what the call looks like, chain fragmentation as an engineering cost.",
+  },
+  {
+    id: "agents",
+    label: "Agents",
+    icps: ["agents"],
+    brief: "Teams building agents that transact: bounded authority, outcomes enforced onchain, policies the agent cannot route around. Newest door, least covered.",
+  },
+];
+
+export const SITE_AUDIENCE_BY_ID: Record<string, SiteAudience> = Object.fromEntries(
+  SITE_AUDIENCES.map((a) => [a.id, a]),
+);
+
+export function siteAudienceLabel(id: string | null | undefined): string | null {
+  if (!id) return null;
+  return SITE_AUDIENCE_BY_ID[id]?.label ?? id;
+}
+
+// Compact block for a prompt that has to pick one audience per idea.
+export function siteAudiencePromptBlock(): string {
+  return SITE_AUDIENCES.map((a) => `- ${a.id}: ${a.label}. ${a.brief}`).join("\n");
+}
+
 export const ICP_BY_ID: Record<string, IcpDef> = Object.fromEntries(
   ICP_DEFS.map((i) => [i.id, i]),
 );

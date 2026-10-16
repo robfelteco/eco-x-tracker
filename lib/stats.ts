@@ -11,6 +11,7 @@ import { getArticleCoverage, pairingVerdict, type PairableTarget } from "./artic
 import { getTemplateTrends, trendVerdict, type TemplateTrend, type TrendFlag } from "./trend.ts";
 import { getDmvLanes, dmvLaneReasons, coldestLane, type DmvLane } from "./dmvLanes.ts";
 import { getAngleBank, type AngleBank } from "./angleBank.ts";
+import { getRatioMeter, type RatioMeter } from "./ratio.ts";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
 // organic posts corrupts a template's baselines, so every stat is filterable.
@@ -424,6 +425,10 @@ export interface Insights {
   // They are LIVE — they already appear in their pillar's lane list — and this
   // is the place to rename, merge or dismiss one.
   pendingLanes: PendingLane[];
+  // The 4-1-1 week strip (lib/ratio.ts). Deliberately NOT filtered by the page
+  // filter: it is a clock on what the audience saw, so amplified and organic
+  // both count and the window is always the last seven days.
+  ratio: RatioMeter;
 }
 
 export interface PendingLane {
@@ -1277,12 +1282,13 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   // The two registry-first shelves. Read unconditionally rather than only when
   // their pillar is on screen: both are small, and the Prioritize page renders
   // every pillar's card at once.
-  const [docPages, homepagePenalty, videos, curriculum, angleBank] = await Promise.all([
+  const [docPages, homepagePenalty, videos, curriculum, angleBank, ratio] = await Promise.all([
     getDocShelf(),
     getHomepagePenalty(),
     getVideoShelf(),
     getCurriculumShelf(),
     getAngleBank(sql),
+    getRatioMeter(sql),
   ]);
 
   const pendingLanes = await buildPendingLanes(registry);
@@ -1300,6 +1306,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     dmvLanes,
     angleBank,
     pendingLanes,
+    ratio,
   };
 }
 

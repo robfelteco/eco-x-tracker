@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AngleBank as Bank, EducationAngle } from "@/lib/angleBank";
+import { SITE_AUDIENCES, siteAudienceLabel } from "@/lib/icp";
 
 // Broad Educational's angle bank.
 //
@@ -18,11 +19,9 @@ import type { AngleBank as Bank, EducationAngle } from "@/lib/angleBank";
 // still missing the Eco bridge" is a truer picture of the pillar than any
 // generated draft was.
 
-const ICPS = [
-  { id: "", label: "No ICP yet" },
-  { id: "institutional", label: "Institutional (finance, payments, treasury)" },
-  { id: "developer", label: "Developer (stablecoin infra builders)" },
-];
+// The six audiences eco.com names, not the old institutional/developer pair.
+// An angle is written for one reader, and the site now says who the readers are.
+const ICPS = [{ id: "", label: "No audience yet" }, ...SITE_AUDIENCES.map((a) => ({ id: a.id, label: a.label }))];
 
 export function AngleBank({ bank, analogs }: { bank: Bank; analogs: { id: string; label: string }[] }) {
   const router = useRouter();
@@ -185,7 +184,7 @@ function AngleRow({
             )}
             {a.icp && (
               <span className="rounded bg-eco-blue/15 px-1.5 py-0.5 font-mono text-[9px] text-eco-lightblue">
-                {a.icp}
+                {siteAudienceLabel(a.icp)}
               </span>
             )}
             {a.status === "parked" && (
@@ -330,7 +329,7 @@ function AngleForm({
       />
       <div className="flex flex-wrap gap-2">
         <label className="flex-1 min-w-[10rem]">
-          <span className="font-mono text-[9px] uppercase tracking-wider text-white/35">ICP</span>
+          <span className="font-mono text-[9px] uppercase tracking-wider text-white/35">Audience</span>
           <select
             value={icp}
             onChange={(e) => setIcp(e.target.value)}

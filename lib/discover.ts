@@ -7,6 +7,7 @@
 // posted and asks only for NEW territory.
 
 import { ECO_ONE_LINER } from "./positioning.ts";
+import { SITE_AUDIENCES, SITE_AUDIENCE_BY_ID, siteAudiencePromptBlock } from "./icp.ts";
 
 const XAI_MODEL = "grok-4.3";
 
@@ -20,13 +21,14 @@ export interface DiscoveredItem {
   summary: string; // 1-3 sentences the operator can build a post from
   keyStat?: string; // the single most quotable number, if any
   contentType: string; // suggested format: "article" | "data/chart" | "short video" | "thread"
-  icp: string; // "institutional" | "developer"
+  icp: string; // one of SITE_AUDIENCES ids (lib/icp.ts)
   source: DiscoverSource;
 }
 
 const ECO_BRIEF = `${ECO_ONE_LINER} Broad-educational posts are TOP-OF-FUNNEL: the market story carries the post and Eco's relevance rides in by implication, Eco is NOT named in the body. The reader should finish smarter about the stablecoin market.
 
-Two ICPs (pick ONE per idea): "institutional" (finance, payments, treasury and tokenization leaders, tradfi-fluent: routing, execution, clearing, settlement, primary/secondary markets, best execution) or "developer" (stablecoin infra builders).`;
+Six audiences, the ones eco.com names. Pick ONE per idea, by id:
+${siteAudiencePromptBlock()}`;
 
 const LENSES = [
   {
@@ -65,7 +67,7 @@ Return ONLY a JSON object (no prose, no code fences) of this shape:
   "summary":"1-3 sentences of the concrete facts + the so-what, only facts from the source",
   "keyStat":"the single most quotable number, short (e.g. \\"$138B\\") — omit if none",
   "contentType":"article" | "data/chart" | "short video" | "thread",
-  "icp":"institutional" | "developer",
+  "icp":${SITE_AUDIENCES.map((a) => `"${a.id}"`).join(" | ")},
   "source":{"title":"outlet + piece, e.g. \\"Artemis, May 2026\\"","url":"https://real-source-url"}
 }]}
 Use only real URLs you actually found via search. Drop any idea whose stat you cannot verify against a real source.`;
@@ -91,7 +93,9 @@ function parseItems(text: string): DiscoveredItem[] {
           contentType: ["article", "data/chart", "short video", "thread"].includes(c.contentType as string)
             ? String(c.contentType)
             : "article",
-          icp: c.icp === "developer" ? "developer" : "institutional",
+          // Anything off the list falls back to the widest door rather than
+          // being dropped: the idea is still usable, the tag is just unknown.
+          icp: SITE_AUDIENCE_BY_ID[String(c.icp)] ? String(c.icp) : "payment_treasury",
           source: { title: String(src.title || src.url || "").trim(), url: String(src.url ?? "").trim() },
         };
       })

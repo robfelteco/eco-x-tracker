@@ -11,6 +11,7 @@ import { getReviewCount } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
 import { FilterBar } from "@/app/components/FilterBar";
 import LaneTray from "@/app/components/LaneTray";
+import { RatioMeter } from "@/app/components/RatioMeter";
 import { parseFilter } from "@/lib/filter";
 import { Eyebrow, Badge, Thumb, Tooltip } from "@/app/components/ui";
 import { writtenDate, daysAgo, compact } from "@/lib/format";
@@ -86,6 +87,7 @@ export default async function PrioritizePage({
       dmvLanes,
       angleBank,
       pendingLanes,
+      ratio,
     },
     reviewCount,
   ] = await Promise.all([getInsights(filter), getReviewCount()]);
@@ -106,6 +108,10 @@ export default async function PrioritizePage({
         <div className="mt-4">
           <FilterBar />
         </div>
+
+        {/* The 4-1-1 clock. Above everything else because it is the one number
+            the pillar ranking below cannot produce on its own. */}
+        <RatioMeter meter={ratio} />
 
         {/* Lanes the last sync drew for subjects that had none. They are already
             live in the pillars below; this is where a wrong one gets corrected. */}
