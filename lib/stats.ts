@@ -11,6 +11,7 @@ import { getArticleCoverage, pairingVerdict, type PairableTarget } from "./artic
 import { getTemplateTrends, trendVerdict, type TemplateTrend, type TrendFlag } from "./trend.ts";
 import { getDmvLanes, dmvLaneReasons, coldestLane, type DmvLane } from "./dmvLanes.ts";
 import { getAngleBank, type AngleBank } from "./angleBank.ts";
+import { getEduPipeline, type EduPipeline } from "./eduIntake.ts";
 import { getRatioMeter, type RatioMeter } from "./ratio.ts";
 
 // Amplified filter: 'all' | 'organic' | 'amplified'. Mixing paid-amplified and
@@ -419,8 +420,12 @@ export interface Insights {
   curriculum: CurriculumShelf;
   // The three Data Motion Visual lanes (lib/dmvLanes.ts).
   dmvLanes: DmvLane[];
-  // Broad Educational's angle bank — what replaced its drafter (lib/angleBank.ts).
+  // Broad Educational's angle bank (lib/angleBank.ts). Superseded by the
+  // pipeline below; kept on Insights until the table is dropped.
   angleBank: AngleBank;
+  // The Broad Educational pipeline (lib/eduIntake.ts): INBOX -> PICKED ->
+  // DRAFTED -> POSTED. Picked candidates are the angle bank now.
+  eduPipeline: EduPipeline;
   // Lanes the sync detector drew and nobody has looked at yet (Migration 019).
   // They are LIVE — they already appear in their pillar's lane list — and this
   // is the place to rename, merge or dismiss one.
@@ -453,6 +458,7 @@ export interface PendingLane {
 
 export type { DmvLane, DmvLaneId } from "./dmvLanes.ts";
 export type { AngleBank, EducationAngle } from "./angleBank.ts";
+export type { EduPipeline, EduCandidate } from "./eduIntake.ts";
 export type { DocShelfRow, HomepagePenalty } from "./docs.ts";
 export type { CurriculumRow, CurriculumMeta, CurriculumShelf } from "./curriculum.ts";
 export type { VideoShelfRow } from "./videos.ts";
@@ -1282,13 +1288,14 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
   // The two registry-first shelves. Read unconditionally rather than only when
   // their pillar is on screen: both are small, and the Prioritize page renders
   // every pillar's card at once.
-  const [docPages, homepagePenalty, videos, curriculum, angleBank, ratio] = await Promise.all([
+  const [docPages, homepagePenalty, videos, curriculum, angleBank, ratio, eduPipeline] = await Promise.all([
     getDocShelf(),
     getHomepagePenalty(),
     getVideoShelf(),
     getCurriculumShelf(),
     getAngleBank(sql),
     getRatioMeter(sql),
+    getEduPipeline(),
   ]);
 
   const pendingLanes = await buildPendingLanes(registry);
@@ -1305,6 +1312,7 @@ export async function getInsights(filter: StatFilter): Promise<Insights> {
     curriculum,
     dmvLanes,
     angleBank,
+    eduPipeline,
     pendingLanes,
     ratio,
   };

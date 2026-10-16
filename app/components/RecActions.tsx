@@ -5,9 +5,8 @@ import { useAction, ActionProgress } from "./useAction";
 import { NestedDisclosure } from "@/app/components/Collapse";
 import { useRouter } from "next/navigation";
 import { QuoteDiscovery } from "./QuoteDiscovery";
-import { AngleBank } from "./AngleBank";
-import { siteAudienceLabel } from "@/lib/icp";
-import type { AngleBank as Bank } from "@/lib/angleBank";
+import { EduPipeline } from "./EduPipeline";
+import type { EduPipeline as Board } from "@/lib/eduIntake";
 
 // One unified action surface per recommendation.
 //
@@ -239,11 +238,10 @@ export function RecActions({
   docsMeta,
   videosMeta,
   broad,
-  curriculum = [],
   curriculumMeta,
   trendFlag = "insufficient",
   trendImprPct = null,
-  angleBank,
+  eduPipeline,
   analogOptions = [],
 }: {
   template: string;
@@ -257,21 +255,16 @@ export function RecActions({
   docsMeta?: DocsMeta;
   videosMeta?: VideosMeta;
   broad?: BroadEdData;
-  curriculum?: LaneGroup[];
+  /** Coverage read for the curriculum; the shelf itself no longer renders here. */
   curriculumMeta?: CurriculumMeta;
   trendFlag?: "improving" | "flat" | "declining" | "insufficient";
   trendImprPct?: number | null;
-  angleBank?: Bank;
+  /** The Broad Educational pipeline (lib/eduIntake.ts). */
+  eduPipeline?: Board;
   analogOptions?: { id: string; label: string }[];
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
-
-  // Discover (broad-educational lane) — fetched candidates become extra targets.
-  const [discovered, setDiscovered] = useState<Target[]>([]);
-  const [discovering, setDiscovering] = useState(false);
-  const [discoverErr, setDiscoverErr] = useState<string | null>(null);
-  const [discoverWarn, setDiscoverWarn] = useState<string[]>([]);
 
   // Draft state, keyed by target.key.
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -298,10 +291,6 @@ export function RecActions({
   // Which lane is open (docs / videos modes). Opens on the top-ranked lane,
   // which is the coldest audience or series — the answer to "what now".
   const [openLane, setOpenLane] = useState<string | null>(lanes[0]?.key ?? null);
-  // The curriculum accordion is independent of `openLane` — both can be on
-  // screen at once inside the Broad Educational card (news lane + teach lane).
-  const [openCurr, setOpenCurr] = useState<string | null>(curriculum[0]?.key ?? null);
-
   // Question mining, keyed by concept target. Demand discovery, not news
   // discovery: what people ASK about a mechanism, ranked unanswered-first.
   const [questionsByKey, setQuestionsByKey] = useState<Record<string, MinedQuestion[]>>({});
@@ -321,12 +310,10 @@ export function RecActions({
   const draftAllAct = useAction("generate-all");
   const sourcesAct = useAction("analog-sources");
   const mineAct = useAction("questions");
-  const discoverAct = useAction("discover");
-
 
   const isBroadDiscovery = mode === "discovery" && template === "broad_educational";
   const isQuoteDiscovery = mode === "discovery" && template === "quote_card";
-  const flatTargets = isBroadDiscovery ? discovered : targets;
+  const flatTargets = targets;
 
   // One draft request, with no progress-bar bookkeeping around it. Split out of
   // draft() so the fan-out can run several of these at once: useAction holds a
@@ -527,38 +514,6 @@ export function RecActions({
       setMineErrByKey((err) => ({ ...err, [t.key]: e instanceof Error ? e.message : "Question mining failed" }));
     } finally {
       setMiningKey(null);
-    }
-  }
-
-  async function runDiscover() {
-    setDiscovering(true);
-    setDiscoverErr(null);
-    setDiscoverWarn([]);
-    try {
-      const data = await discoverAct.run(async () => {
-        const res = await fetch("/api/discover", { method: "POST" });
-        return res.json();
-      });
-      if (data.ok) {
-        setDiscovered(
-          (data.items ?? []).map((it: Record<string, unknown>, i: number) => ({
-            key: `disc-${i}`,
-            label: String(it.headline ?? ""),
-            sublabel: [it.keyStat, it.contentType, siteAudienceLabel(String(it.icp ?? ""))].filter(Boolean).join(" · "),
-            chain: null,
-            angle: String(it.headline ?? ""),
-            basePostText: [it.summary, it.source && (it.source as { url?: string }).url ? `Source: ${(it.source as { url: string }).url}` : ""]
-              .filter(Boolean)
-              .join("\n"),
-            href: (it.source as { url?: string } | undefined)?.url ?? null,
-          })),
-        );
-        setDiscoverWarn(data.warnings ?? []);
-      } else setDiscoverErr(data.error || "Discover failed");
-    } catch (e) {
-      setDiscoverErr(e instanceof Error ? e.message : "Discover failed");
-    } finally {
-      setDiscovering(false);
     }
   }
 
@@ -1088,7 +1043,7 @@ export function RecActions({
             {mode === "products" && "Pick the product, then the piece behind it — or a partner running Eco. Shapes show which angle has gone cold."}
             {mode === "articles" && "One row per article, not per post — the count is how many times we've already run it."}
             {isBroadDiscovery &&
-              "Two jobs in one pillar: teach a mechanism nobody has explained, or find fresh market news. (We never reshare a piece.)"}
+              "One queue, four states. The inbox is stocked nightly and pre-framed; you pick, fix the bridge, draft, post. (We never reshare a piece.)"}
             {isQuoteDiscovery && "Quote cards are used once, so there is nothing to re-run — this lane finds new ones."}
             {mode === "docs" &&
               "Pick the audience, then the docs page. Every page on docs.eco.com is here — the ones you've never linked rank first."}
@@ -1104,89 +1059,26 @@ export function RecActions({
       {isQuoteDiscovery && <QuoteDiscovery />}
 
       {/* ------------------------------------------------------------------
-          Broad Educational renders as TWO LANES, because it is doing two jobs.
-          Everything in this pillar today is market news; a curriculum post is a
-          different act — it teaches a mechanism instead of reporting a signal.
-          They share a pillar (an analog explainer IS external, mechanism-level,
-          Eco-unnamed content) but they do not share a clock: news decays, a
-          concept we have never taught does not.
+          Broad Educational is ONE PIPELINE (Phase 2 of docs/BROAD-ED-REDESIGN.md).
+          It used to render three surfaces here: an angle bank with a blank
+          seven-field form, a four-tier curriculum accordion with per-source
+          fan-out, teaching shapes and question mining, and a Discover button
+          whose results lived in React state. None fed the next, and the
+          pillar ran at 8% of main posts against a 4-1-1 that needs ~45%.
+
+          Now: the coverage headline (the curriculum as a READ, and the number
+          behind the "mechanisms never taught" chip), the four-state board, and
+          the what-worked table underneath as the reminder of which shape wins
+          in this pillar. The curriculum libraries stay in place; a concept is
+          now a tag on a candidate, not a lane of its own.
           ------------------------------------------------------------------ */}
-      {/* ------------------------------------------------------------------
-          The angle bank comes FIRST, and it is what used to be a draft button.
-          The drafter on this pillar could turn a source into a post; what was
-          missing sat a step earlier — the frame, and how it reaches what Eco
-          does. Jay's call on 2 Sep was to work those out by hand before
-          automating anything here, and to let the tracker keep score of them
-          meanwhile. So the pillar leads with the bank, and the two shelves below
-          are the raw material for filling it.
-          ------------------------------------------------------------------ */}
-      {isBroadDiscovery && angleBank && (
+      {isBroadDiscovery && curriculumMeta && <CurriculumHeadline meta={curriculumMeta} />}
+      {isBroadDiscovery && eduPipeline && (
         <div className="mb-4">
-          <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">Angle bank</span>
-            <span className="text-[11px] text-white/30">
-              the frames you&apos;ve worked out — no drafting here on purpose, this pillar is worked by hand until a
-              few of these have landed
-            </span>
-          </div>
-          <AngleBank bank={angleBank} analogs={analogOptions} />
+          <EduPipeline pipeline={eduPipeline} analogOptions={analogOptions} />
         </div>
       )}
-
-      {isBroadDiscovery && curriculum.length > 0 && (
-        <div className="mb-4">
-          <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">Lane 1 · Analog curriculum</span>
-            <span className="text-[11px] text-white/30">
-              teach the mechanism the market runs on — ranked by what we have never covered
-            </span>
-          </div>
-          {curriculumMeta && <CurriculumHeadline meta={curriculumMeta} />}
-          <div className="space-y-1.5">
-            {curriculum.map((lane) => {
-              const open = openCurr === lane.key;
-              return (
-                <NestedDisclosure
-                  key={lane.key}
-                  label={lane.label}
-                  sublabel={lane.sublabel}
-                  count={lane.targets.length}
-                  open={open}
-                  onToggle={() => setOpenCurr(open ? null : lane.key)}
-                >
-                  {lane.hint && <p className="text-[11px] text-white/40">{lane.hint}</p>}
-                  <div className="space-y-1.5">{lane.targets.map((t) => renderTarget(t, true))}</div>
-                </NestedDisclosure>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {isBroadDiscovery && (
-        <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-white/40">Lane 2 · Market news</span>
-          <span className="text-[11px] text-white/30">what is happening right now — ranked by freshness</span>
-        </div>
-      )}
-
       {isBroadDiscovery && broad && <WhatWorked broad={broad} />}
-      {isBroadDiscovery && (
-        <div className="mb-3">
-          <button
-            onClick={runDiscover}
-            disabled={discovering}
-            className="rounded-full bg-eco-blue px-3.5 py-1.5 text-xs font-medium text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {discovering ? "Discovering…" : discovered.length ? "Discover more" : "Discover fresh sources"}
-          </button>
-          {discovering && <ActionProgress state={discoverAct.state} className="max-w-md" />}
-          {discoverErr && <span className="ml-2 font-mono text-[11px] text-red-400">{discoverErr}</span>}
-          {discoverWarn.map((w, i) => (
-            <div key={i} className="mt-1 font-mono text-[10px] text-amber-300/70">{w}</div>
-          ))}
-        </div>
-      )}
 
       {mode === "docs" && docsMeta && <DocsHeadline meta={docsMeta} />}
       {mode === "videos" && videosMeta && <VideosHeadline meta={videosMeta} />}
@@ -1305,7 +1197,7 @@ export function RecActions({
       {/* Every other mode: a flat target list. No shape picker — the seven
           shapes were derived from the product pillar, and offering "Partner
           proof" on a thought-leadership article implies a job it doesn't have. */}
-      {mode !== "products" && mode !== "docs" && mode !== "videos" && mode !== "dmv" && !isQuoteDiscovery && (
+      {mode !== "products" && mode !== "docs" && mode !== "videos" && mode !== "dmv" && !isQuoteDiscovery && !isBroadDiscovery && (
         <div className="space-y-1.5">{flatTargets.map((t) => renderTarget(t))}</div>
       )}
     </div>

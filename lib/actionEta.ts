@@ -24,7 +24,8 @@ export type ActionKind =
   | "label"
   | "use"
   | "review"
-  | "roster";
+  | "roster"
+  | "edu-intake";
 
 export interface ActionDef {
   /** Present participle, shown while it runs: "Drafting copy…". */
@@ -83,6 +84,14 @@ export const ACTIONS: Record<ActionKind, ActionDef> = {
   use: { verb: "Saving", defaultMs: 1_200 },
   review: { verb: "Saving", defaultMs: 1_200 },
   roster: { verb: "Saving", defaultMs: 1_200 },
+  // Three Grok lenses in parallel (~90s, the long pole) then one scrape and one
+  // short Claude call per new candidate. Measured on the first live run: 12
+  // framings at ~6s each after the lenses returned.
+  "edu-intake": {
+    verb: "Stocking the inbox",
+    defaultMs: 180_000,
+    note: "Searching three lenses, scraping each piece, scoring adjacency and pre-filling the frame.",
+  },
 };
 
 /**

@@ -5,7 +5,6 @@ import {
   type ArticleShelfRow,
   type BroadEdBreakdown,
   type CurriculumShelf,
-  type CurriculumRow,
 } from "@/lib/stats";
 import { getReviewCount } from "@/lib/queries";
 import { Sidebar } from "@/app/components/Sidebar";
@@ -29,11 +28,11 @@ import {
 import type { DocShelfRow, HomepagePenalty } from "@/lib/docs";
 import type { VideoShelfRow } from "@/lib/videos";
 import type { DmvLane } from "@/lib/dmvLanes";
-import type { AngleBank } from "@/lib/angleBank";
+import type { EduPipeline } from "@/lib/eduIntake";
 import { ICP_DEFS } from "@/lib/icp";
 import { SERIES_DEFS } from "@/lib/videos";
 import { TEMPLATE_BY_ID } from "@/lib/taxonomy";
-import { TIER_LABEL as ANALOG_TIER_LABEL, TIER_HINT as ANALOG_TIER_HINT, ANALOG_DEFS, type AnalogTier } from "@/lib/analogs";
+import { ANALOG_DEFS } from "@/lib/analogs";
 import { ExpandableCard, CollapsibleSection } from "@/app/components/Collapse";
 
 export const dynamic = "force-dynamic";
@@ -85,7 +84,7 @@ export default async function PrioritizePage({
       videos,
       curriculum,
       dmvLanes,
-      angleBank,
+      eduPipeline,
       pendingLanes,
       ratio,
     },
@@ -155,7 +154,7 @@ export default async function PrioritizePage({
                 videos={videos}
                 curriculum={curriculum}
                 dmvLanes={dmvLanes}
-                angleBank={angleBank}
+                eduPipeline={eduPipeline}
               />
             ))}
           </div>
@@ -214,7 +213,7 @@ function buildActions(
   videos: VideoShelfRow[],
   curriculum: CurriculumShelf,
   dmvLanes: DmvLane[],
-  angleBank: AngleBank,
+  eduPipeline: EduPipeline,
 ): {
   mode: DraftMode;
   targets: Target[];
@@ -224,9 +223,8 @@ function buildActions(
   docsMeta?: DocsMeta;
   videosMeta?: VideosMeta;
   broad?: BroadEdBreakdown;
-  curriculum?: LaneGroup[];
   curriculumMeta?: CurriculumMeta;
-  angleBank?: AngleBank;
+  eduPipeline?: EduPipeline;
 } {
   const mode = TEMPLATE_BY_ID[rec.template].draftMode;
 
@@ -300,12 +298,15 @@ function buildActions(
 
   if (mode === "discovery") {
     if (rec.template !== "broad_educational") return { mode, targets: [] };
+    // Broad Educational is the pipeline (Phase 2 of docs/BROAD-ED-REDESIGN.md).
+    // The curriculum shelf no longer renders as lanes on this card; only its
+    // coverage headline survives, as the read behind the "never taught" chip.
     return {
       mode,
       targets: [],
       broad: broadEd,
-      angleBank,
-      ...buildCurriculumLanes(curriculum),
+      curriculumMeta: curriculum.meta,
+      eduPipeline,
     };
   }
 
@@ -396,7 +397,7 @@ function articleTarget(a: ArticleShelfRow, product?: string): Target {
 
 type DraftMode = "chains" | "products" | "articles" | "discovery" | "docs" | "videos" | "dmv" | "generic";
 
-// Flattened for the angle-bank dropdown. RecActions is a client component, so
+// Flattened for the pipeline's concept dropdown. RecActions is a client component, so
 // it gets ids and labels only — never ANALOG_DEFS itself, which carries the
 // server-side briefs and would land in the browser bundle.
 const ANALOG_OPTIONS = ANALOG_DEFS.map((a) => ({ id: a.id, label: a.label }));
@@ -488,133 +489,6 @@ function docTarget(r: DocShelfRow): Target & { score: number } {
     // The drafter gets the full page body server-side; this is just the seed.
     basePostText: r.hook ?? r.blurb,
     angle: r.hook,
-    priorTexts: r.posts.slice(0, 6).map((p) => p.text),
-    score: r.score,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Analog curriculum — group the concept registry by Jay's four tiers.
-//
-// Tier and not ICP, unlike the docs shelf. The docs shelf groups by audience
-// because its question is "whose door haven't I knocked on" among pages that
-// all already exist. Here the question is different: the tiers ARE a difficulty
-// and proximity ladder (Tier 1 is the direct analog, Tier 4 is context), and
-// they came from Jay in that order. The ICPs ride along on every row instead.
-//
-// Every concept appears, taught or not. That is the entire point of a
-// registry-first shelf — a concept with no post attached is the most valuable
-// row on it, and would be invisible on any shelf derived from posts.
-// ---------------------------------------------------------------------------
-function buildCurriculumLanes(shelf: CurriculumShelf): {
-  curriculum: LaneGroup[];
-  curriculumMeta: CurriculumMeta;
-} {
-  const tiers: AnalogTier[] = [1, 2, 3, 4];
-  const curriculum: LaneGroup[] = tiers
-    .map((tier) => {
-      const rows = shelf.rows.filter((r) => r.tier === tier).sort((a, b) => b.score - a.score);
-      const never = rows.filter((r) => r.useCount === 0).length;
-      return {
-        key: `tier-${tier}`,
-        label: ANALOG_TIER_LABEL[tier],
-        sublabel: `${rows.length} concept${rows.length === 1 ? "" : "s"} · ${never} never taught`,
-        hint: ANALOG_TIER_HINT[tier],
-        targets: rows.map((r) => curriculumTarget(r)),
-      };
-    })
-    .filter((l) => l.targets.length > 0)
-    // Coldest, strongest tier first — same rule as the docs and video lanes.
-    .sort((a, b) => (b.targets[0]?.score ?? 0) - (a.targets[0]?.score ?? 0));
-
-  return { curriculum, curriculumMeta: shelf.meta };
-}
-
-function curriculumTarget(r: CurriculumRow): Target & { score: number } {
-  const badges: NonNullable<Target["badges"]> = [];
-  if (r.useCount === 0) {
-    badges.push({ label: "Never taught", tone: "good", title: "No @eco post has ever explained this mechanism." });
-  }
-  if (r.breakStrength === 3) {
-    badges.push({ label: "Sharp break", tone: "good", title: "The divergence from the analog is strong and differentiated." });
-  }
-  badges.push({
-    label: r.side === "commercial" ? "Commercial" : "Technical",
-    tone: "mute",
-    title: `Written for the ${r.side} door: ${r.icpLabels.join(", ")}.`,
-  });
-  if (r.guardrail) {
-    badges.push({ label: "Guardrail", tone: "warn", title: r.guardrail });
-  }
-  if (r.currentCount === 0 && r.canonicalCount > 0) {
-    badges.push({
-      label: "No fresh angle",
-      tone: "warn",
-      title:
-        "Only evergreen material behind this concept, so a draft can be correct but not timely. The sweep will keep looking.",
-    });
-  }
-  if (r.needsSources) {
-    badges.push({
-      label: "Needs sources",
-      tone: "warn",
-      title: "No verified source material — drafting is blocked until this concept has something citable behind it.",
-    });
-  }
-  return {
-    key: `analog-${r.analogId}`,
-    label: r.label,
-    sublabel: [
-      `score ${r.score}`,
-      r.icpLabels.join(", "),
-      r.useCount === 0 ? "never taught" : `taught ${r.useCount}×`,
-      r.mentionCount > 0 ? `${r.mentionCount} passing mention${r.mentionCount === 1 ? "" : "s"}` : null,
-      // Tiers, not a total: "5 sources" hid the fact that all five were
-      // evergreen and nothing recent had come in.
-      r.sources.length
-        ? [
-            r.canonicalCount ? `${r.canonicalCount} canonical` : null,
-            r.currentCount ? `${r.currentCount} current` : null,
-            r.freshestDays != null ? `newest ${daysAgo(r.freshestDays)}` : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")
-        : "no sources",
-      r.lastSweptDays == null ? "never swept" : `swept ${daysAgo(r.lastSweptDays)}`,
-      r.medianImpr != null ? `${compact(r.medianImpr)} median impr` : null,
-      r.daysSinceLastUse != null ? `last ${daysAgo(r.daysSinceLastUse)}` : null,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    analogId: r.analogId,
-    badges,
-    useCount: r.useCount,
-    // The break, surfaced on the row. The drafter gets the full parallel AND
-    // break server-side; this is the half the operator needs to read to decide
-    // whether the concept is worth a post today.
-    note: r.breaksWhere,
-    sources: r.sources.map((s) => ({
-      // The id is what makes a source individually draftable. Number(), not the
-      // raw value: analog_sources.id is a bigint, and the Neon driver hands
-      // those back as STRINGS. The type here says number, and a string wearing
-      // that type is exactly how /api/generate ended up silently dropping every
-      // article-backed source (see the toId comment in its route).
-      id: Number(s.id),
-      title: s.title,
-      url: s.url,
-      publisher: s.publisher,
-      kind: s.kind,
-      seed: s.sourceOf === "seed",
-      tier: s.tier,
-      ageDays: s.ageDays,
-      factsCount: s.keyFacts.length,
-      // The drafting gate (migration 013). A source whose full text we have
-      // never ingested cannot be argued from, so the row says so rather than
-      // offering a button that throws.
-      grounded: s.textDocId != null,
-    })),
-    basePostText: null,
-    angle: null,
     priorTexts: r.posts.slice(0, 6).map((p) => p.text),
     score: r.score,
   };
@@ -762,7 +636,7 @@ function shelfSummary(
   lanes: LaneGroup[] | undefined,
   curriculumMeta?: CurriculumMeta,
   dmvLanes?: DmvLane[],
-  angleBank?: AngleBank,
+  eduPipeline?: EduPipeline,
 ): { count: string | undefined; nested: boolean } {
   const prods = products ?? [];
   const groups = lanes ?? [];
@@ -791,17 +665,18 @@ function shelfSummary(
     return { count: `${prods.length} products \u00b7 ${total} to draft from`, nested: true };
   }
   if (mode === "discovery") {
-    // Broad Educational's collapsed row should lead with the coverage gap, not
-    // with "run discovery" — the untaught count is the number that should make
-    // someone open the card.
-    if (curriculumMeta) {
-      const banked = angleBank?.banked ?? 0;
-      return {
-        count:
-          `${curriculumMeta.neverTaught}/${curriculumMeta.totalConcepts} concepts untaught \u00b7 ` +
-          `${banked} angle${banked === 1 ? "" : "s"} banked`,
-        nested: true,
-      };
+    // Broad Educational's collapsed row is the pipeline's state: what is
+    // waiting to be read, what is queued for the week, what is ready to post.
+    // The untaught count rides along because it is the number the curriculum
+    // chip filters on.
+    if (eduPipeline) {
+      const parts = [
+        `${eduPipeline.inbox.length} in inbox`,
+        `${eduPipeline.picked.length} picked`,
+        eduPipeline.drafted.length ? `${eduPipeline.drafted.length} drafted` : null,
+        curriculumMeta ? `${curriculumMeta.neverTaught}/${curriculumMeta.totalConcepts} concepts untaught` : null,
+      ].filter(Boolean);
+      return { count: parts.join(" \u00b7 "), nested: true };
     }
     return { count: targets.length ? `${targets.length} sources` : "run discovery", nested: false };
   }
@@ -819,7 +694,7 @@ function RecCard({
   videos,
   curriculum,
   dmvLanes,
-  angleBank,
+  eduPipeline,
 }: {
   rec: Recommendation;
   rank: number;
@@ -830,7 +705,7 @@ function RecCard({
   videos: VideoShelfRow[];
   curriculum: CurriculumShelf;
   dmvLanes: DmvLane[];
-  angleBank: AngleBank;
+  eduPipeline: EduPipeline;
 }) {
   const top = rank === 1 && rec.score > 0;
   const lastType = mediaLabel(rec.lastMediaType);
@@ -843,10 +718,9 @@ function RecCard({
     docsMeta,
     videosMeta,
     broad,
-    curriculum: currLanes,
     curriculumMeta,
-    angleBank: bank,
-  } = buildActions(rec, tlArticles, broadEd, docPages, homepagePenalty, videos, curriculum, dmvLanes, angleBank);
+    eduPipeline: board,
+  } = buildActions(rec, tlArticles, broadEd, docPages, homepagePenalty, videos, curriculum, dmvLanes, eduPipeline);
 
   // Everything above the break line — the at-a-glance read, always visible.
   const header = (
@@ -897,13 +771,13 @@ function RecCard({
   // What is behind the click, said out loud on the collapsed row. A first-time
   // reader shouldn't have to open a pillar to learn whether it has anything in
   // it — or whether it nests another level of accordions inside.
-  const shelf = shelfSummary(mode, targets, products, lanes, curriculumMeta, dmvLanes, bank);
+  const shelf = shelfSummary(mode, targets, products, lanes, curriculumMeta, dmvLanes, board);
 
   return (
     <ExpandableCard
       header={header}
       highlight={top}
-      actionLabel={curriculumMeta ? "Bank an angle · find sources" : ACTION_LABEL[mode]}
+      actionLabel={board ? "Read the inbox · pick · draft" : ACTION_LABEL[mode]}
       count={shelf.count}
       nested={shelf.nested}
       defaultOpen={rank === 1}
@@ -919,11 +793,10 @@ function RecCard({
         docsMeta={docsMeta}
         videosMeta={videosMeta}
         broad={broad}
-        curriculum={currLanes}
         curriculumMeta={curriculumMeta}
         trendFlag={rec.trendFlag}
         trendImprPct={rec.trendImprPct}
-        angleBank={bank}
+        eduPipeline={board}
         analogOptions={ANALOG_OPTIONS}
       />
     </ExpandableCard>

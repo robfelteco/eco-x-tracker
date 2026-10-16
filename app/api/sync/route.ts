@@ -5,6 +5,7 @@ import { runAnalogSweep } from "@/lib/analogSweep";
 import { runMomentumSweep } from "@/lib/chainMomentum";
 import { sql } from "@/lib/db";
 import { attributeArticles } from "@/lib/articleAttribution";
+import { attributeEduCandidates } from "@/lib/eduIntake";
 import { syncDocPages, attributeDocPages } from "@/lib/docs";
 import { tagDocPages } from "@/lib/docsTag";
 import { syncYouTubeVideos } from "@/lib/videos";
@@ -64,6 +65,18 @@ async function handle(req: NextRequest) {
       classifyErrors.push(...res.errors.slice(0, 5));
     } catch (err) {
       classifyErrors.push(err instanceof Error ? err.message.slice(0, 200) : String(err));
+    }
+
+    // Close the Broad Educational loop: a new post in that pillar whose
+    // resolved link matches a pipeline candidate's source marks the candidate
+    // posted and attaches the post (lib/eduIntake.ts). Same URL join the
+    // article rung above uses, pointed at other people's articles. Free, so it
+    // runs on every sync; best-effort, so it never fails one.
+    let eduMatched = 0;
+    try {
+      eduMatched = (await attributeEduCandidates()).matched;
+    } catch (err) {
+      classifyErrors.push(`edu pipeline: ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
     }
 
     // Refresh the two registry-first shelves.
@@ -171,6 +184,7 @@ async function handle(req: NextRequest) {
         classified: { ruleSettled, claudeClassified, errors: classifyErrors },
         shelves,
         articlesMatched,
+        eduMatched,
         momentum,
         sweep,
       },
