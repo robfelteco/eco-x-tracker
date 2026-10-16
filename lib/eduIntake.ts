@@ -4,7 +4,7 @@ import { discover, type DiscoveredItem } from "./discover.ts";
 import { ANALOG_BY_ID, detectAnalog } from "./analogs.ts";
 import { SITE_AUDIENCES, SITE_AUDIENCE_BY_ID, siteAudiencePromptBlock } from "./icp.ts";
 import { ECO_ONE_LINER } from "./positioning.ts";
-import { sanitizePrompt } from "./antiSlop.ts";
+import { sanitizePrompt, stripDashes } from "./antiSlop.ts";
 import type { CopyOption } from "./generateCopy.ts";
 
 // The Broad Educational intake: stock the inbox, then keep the pipeline honest.
@@ -125,9 +125,24 @@ export interface EduPipeline {
 
 type Raw = Omit<EduCandidate, "analogLabel" | "drafts"> & { drafts: unknown };
 
+// The Neon driver hands timestamptz columns back as Date objects, not the ISO
+// strings the interface promises, and the first UI draft died on
+// `publishedAt.slice is not a function`. Normalised once, here, so every
+// consumer (the drafter, the card, JSON responses) sees one shape.
+function iso(v: unknown): string | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v.toISOString();
+  return String(v);
+}
+
 function hydrate(r: Raw): EduCandidate {
   return {
     ...r,
+    publishedAt: iso(r.publishedAt),
+    draftedAt: iso(r.draftedAt),
+    postedAt: iso(r.postedAt),
+    pickedAt: iso(r.pickedAt),
+    createdAt: iso(r.createdAt) ?? "",
     id: Number(r.id),
     rawDocumentId: r.rawDocumentId == null ? null : Number(r.rawDocumentId),
     adjacencyScore: Number(r.adjacencyScore ?? 0),
@@ -475,17 +490,21 @@ function parseFraming(raw: string): Framing | null {
     const theme = THEME_BY_ID[String(o.theme)] ? String(o.theme) : null;
     const score = Math.max(0, Math.min(100, Math.round(Number(o.score) || 0)));
     const reasons = Array.isArray(o.reasons) ? o.reasons.map((r) => String(r).trim()).filter(Boolean).slice(0, 3) : [];
-    const frame = String(o.frame ?? "").trim();
+    // House rule applied at the door: the four fields are handed to the
+    // drafter as the post's spine, and prompt style is imitated. The first
+    // live run came back with an em dash in a third of the bridges.
+    const clean = (v: unknown, max: number) => nz(stripDashes(String(v ?? "")), max);
+    const frame = clean(o.frame, 400);
     if (!frame) return null;
     return {
       audience,
       theme,
       score,
-      reasons,
-      frame: frame.slice(0, 400),
-      mechanism: nz(String(o.mechanism ?? ""), 600),
-      ecoBridge: nz(String(o.ecoBridge ?? ""), 600),
-      evidence: nz(String(o.evidence ?? ""), 600),
+      reasons: reasons.map((r) => stripDashes(r)),
+      frame,
+      mechanism: clean(o.mechanism, 600),
+      ecoBridge: clean(o.ecoBridge, 600),
+      evidence: clean(o.evidence, 600),
     };
   } catch {
     return null;
