@@ -18,7 +18,13 @@ getting wrong:
    words, clustered by KL-divergence k-means. One cluster appeared in 2026 and
    accounts for 40% of human-attributed PRs. Strongest on *what is happening now*.
 
-The three overlap, which is the useful part: a rule all three independently arrive
+4. **stop-slop** (the `/stop-slop` skill, `~/.claude/skills/stop-slop`), added
+   2026-10-16. Phrase lists plus the STRUCTURAL tells the first three sources only
+   gesture at: false agency, Wh- openers, trailing "X, not Y", lazy extremes,
+   adverbs, punchy paragraph endings, metronomic sentence length. Strongest on
+   *what a draft does once it has learned the word list*. Tier 6 below.
+
+The sources overlap, which is the useful part: a rule they independently arrive
 at is a rule to enforce hard. Where they disagree, the disagreement is recorded
 below with the call we made.
 
@@ -218,6 +224,59 @@ model reaches for when it has two examples and a rhythm to fill.
 
 **Every paragraph ending on a punchy line.** Pick one place to land hard.
 
+Tier 4 used to be prose guidance only. Tier 6 is the part of it that turned out to
+be countable.
+
+---
+
+## Tier 6: structure (stop-slop)
+
+Added 2026-10-16 after a week of Broad Educational pipeline drafts cleared every
+tier above and still read as one voice. None had a banned word. Each had one
+register word, no em dash, a real number and a real source. Together they had:
+"X, not Y" closing four sentences in one post, every paragraph landing on a
+four-word line, three fifteen-word sentences in a row, and a noun doing a human
+verb in most sentences ("the inventory model becomes a flow model"). The tells had
+moved from words to structure, and structure is counted, not matched.
+
+Everything here is a **budget**, because each move is fine once. Twice is the
+pattern.
+
+| Rule | Budget | Severity | What it counts |
+| --- | --- | --- | --- |
+| `trailing-contrast` | 1 | hard | "X, not Y." and "rather than" |
+| `wh-opener` | 1 | soft | Statements (not questions) opening What/When/Where/Which/Who/Why/How |
+| `lazy-extremes` | 1 | soft | every, always, never, everyone, nobody, no one |
+| `adverb-pileup` | 2 | soft | -ly words, with a whitelist for only/early/daily and the nouns that end in ly |
+| `punchy-endings` | 1 | soft | Paragraphs of 2+ sentences that end on a line of six words or fewer |
+| `staccato` | 0 | soft | Three consecutive sentences of six words or fewer |
+| `metronome` | 0 | soft | Three consecutive sentences within three words of each other, all 10 to 24 words |
+| `false-agency` | 0 | soft | An inanimate subject (model, market, data, decision, rail...) doing a human verb (becomes, rewards, tells us, shifts, moves toward) |
+| `vague-declarative` | 0 | hard | "The reasons are structural", "the implications are significant", "the underlying problem is more specific" |
+| `worth-frame` | 0 | hard | "The number worth sitting with is", "the detail worth carrying forward is" |
+| `telling` | 0 | hard | "this is what X actually looks like", "actually matters", "this is genuinely hard" |
+| `fragment-drama` | 0 | hard | "That's it. That's the post.", "Full stop." |
+| `so-opener` | 0 | soft | A paragraph starting with "So," |
+| `jargon` | 0 | soft | navigate, unpack, landscape (soft because the one-liner says "navigating") |
+
+Widened in the same pass: `real-question` now covers "the actual shift", "the
+underlying problem", "the material question"; `binary-contrast` now catches the
+uncontracted "It is not X. It is Y." form.
+
+**Recorded disagreement.** The skill kills every adverb, every Wh- opener and every
+stacked fragment. The pillar's third-best post ever ("Not one chain. Eight. Not one
+stablecoin. Six.", 3.3k impressions) is negative listing and staccato, written by a
+person on purpose. So `staccato` is soft, adverbs get two, and Wh- gets one. Run
+against the twelve top-performing human posts in the pillar, Tier 6 produces zero
+hard findings; against the pipeline drafts it produced four or five apiece.
+
+**The repair threshold moved.** Until this pass only a hard finding bought a repair
+round-trip, so a draft with five soft findings shipped untouched. Now three or more
+findings of any severity earn the repair (`needsRepair` in `lib/antiSlop.ts`), the
+repair prompt is told that structural findings are fixed by rewriting the flagged
+sentence rather than deleting a word, and a repair is kept when it lowers the hard
+count, or keeps it and lowers the total.
+
 ---
 
 ## Tier 5: the commodity zone
@@ -393,6 +452,8 @@ flag; no repair round-trip is spent on it.
 7. Does the payload deliver what the first line implies? An overpromised hook is
    penalized directly by the click-dwell term.
 8. Does it end on something concrete or open, not a kicker or a recap?
-9. Read it aloud. Do the sentences vary, or do they march?
+9. Read it aloud. Do the sentences vary, or do they march? Tier 6 counts the
+   march: no three sentences the same length, no two paragraphs ending punchy,
+   one "X, not Y" at most, a human subject on the verbs.
 10. Would a treasury operator or a solver dev paste this into a work channel? That
     is the 20.0 signal, and it is the only score that matters.

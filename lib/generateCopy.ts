@@ -33,6 +33,8 @@ import {
   sanitizePrompt,
   scanSlop,
   hardFindings,
+  needsRepair,
+  repairImproved,
   findingsForRepair,
   type SlopFinding,
 } from "./antiSlop.ts";
@@ -1249,7 +1251,10 @@ async function polish(
     return { ...o, text, claimVerdicts: verdicts, slop: [...scanAll(text, o.sourceUrl), ...grounding] };
   });
 
-  const failing = fixed.filter((o) => hardFindings(o.slop ?? []).length > 0);
+  // A hard finding, OR a pile of soft structural ones (lib/antiSlop.ts,
+  // needsRepair). The second case is the one Rob kept seeing: nothing on the
+  // draft individually wrong, and together it was model prose.
+  const failing = fixed.filter((o) => needsRepair(o.slop ?? []));
   if (!failing.length || process.env.COPY_SLOP_REPAIR === "off") {
     if (failing.length) console.log(`[generateCopy] slop repair skipped (COPY_SLOP_REPAIR=off), ${failing.length} draft(s) failing`);
     // Still filtered. COPY_SLOP_REPAIR=off turns off the REPAIR round-trip, not
@@ -1266,6 +1271,14 @@ async function polish(
     "The drafts below failed the mechanical house checks. Fix ONLY what is flagged.",
     "Keep the angle, the argument, the facts, the length band and any URL EXACTLY as they are.",
     "Do not smooth the voice, do not re-hedge a claim, do not add a closing line.",
+    // Structural findings (trailing-contrast, punchy-endings, metronome,
+    // false-agency, wh-opener) cannot be fixed by deleting a word. They need
+    // the flagged sentences REWRITTEN, which the two lines above would otherwise
+    // forbid. Said explicitly, with the shape of the fix.
+    "A STRUCTURAL finding (trailing-contrast, punchy-endings, metronome, staccato, false-agency,",
+    "wh-opener, lazy-extremes, adverb-pileup) is fixed by rewriting the flagged sentences, not by",
+    "deleting a word: state Y without the 'not X', give the sentence a human subject, join or",
+    "lengthen the short line, lead with the noun instead of the Wh- word. Same facts, same URL.",
     // Without this carve-out the repair pass is stuck: a false-recency finding
     // can only be fixed by changing the words that assert the date, and the
     // line above tells it to keep the facts as they are.
@@ -1315,10 +1328,11 @@ async function polish(
       const grounding = sourceBody
         ? [...groundingFindings(verdicts), ...attributionFindings(text, stillClaimed, target.sourceTitle)]
         : [];
-      // Only accept the repair if it actually reduced the hard findings. A
-      // repair that makes it worse is worse than the draft we already had.
+      // Only accept the repair if it is a strict improvement: fewer hard
+      // findings, or the same hard count and fewer findings overall. A repair
+      // that makes it worse is worse than the draft we already had.
       const after = [...scanAll(text, target.sourceUrl), ...grounding];
-      if (hardFindings(after).length < hardFindings(target.slop ?? []).length) {
+      if (repairImproved(target.slop ?? [], after)) {
         target.text = text;
         target.slop = after;
         target.claims = stillClaimed;

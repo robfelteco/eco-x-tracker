@@ -2,7 +2,7 @@
 
 Everything that feeds the copy drafter in the Eco X tracker, in one document.
 
-Generated from the live source on 2026-09-02 by `scripts/export-copy-brief.ts`. Do not hand-edit: change the module and re-run the script, or the edit is lost and the app and this document disagree.
+Generated from the live source on 2026-10-16 by `scripts/export-copy-brief.ts`. Do not hand-edit: change the module and re-run the script, or the edit is lost and the app and this document disagree.
 
 | Section | Generated from |
 | --- | --- |
@@ -321,7 +321,7 @@ Each pillar gets its own construction rules. `Form` is a length steer only, neve
 
 ### Broad Educational
 
-`broad_educational` · flagged stale after 10 days
+`broad_educational` · flagged stale after 2 days
 
 **What belongs here.** External stablecoin-market content that never mentions Eco: external articles, external X articles, short clips about what's happening in the stablecoin space. Signals: external link domains, zero Eco/product mentions, market-commentary framing.
 
@@ -458,6 +458,14 @@ Permit3 extends Permit2 to a multichain world. One EIP-712 signature authorizes 
 Programmable Addresses close the asymmetry that has existed since crypto began: you can program what happens when you SEND money onchain, but not what happens when you RECEIVE it. A Programmable Address is a product-specific address that auto-settles inbound transfers by rules you set — swap, bridge, deposit, or split — executed the moment any sender sends from any chain. Cross-chain deposits are the first live use case.
 
 *Recognised in copy as:* `programmable address`, `programmable addresses`
+
+### Eco API
+
+The Eco API (launched 14 Oct 2026) puts Eco's whole surface behind one versioned base URL at api.eco.com: quoting, funding, routing and transaction status, with one key, one request shape and one error catalog. It replaced separate services with different shapes (the quotes service, the solver's endpoints). Quotes group source and destination into their own objects with an explicit funder; swaps and transfers return fuller route data; and Eco signs every quote, so an integrator can verify recipient, amounts, expiry and their own destination conditions before funds move. One verification covers every route, whether a quote carries one intent or batches several. Built for wallets (one-click transfer/swap quotes), exchanges (deposit flows) and treasury apps (automated movement between networks with tracked status).
+
+> **Guardrail.** It is a unified interface over existing Eco products, not a new execution engine. Do not claim new chains or assets beyond 'upgraded routing and asset coverage'.
+
+*Recognised in copy as:* `eco api`, `api.eco.com`
 
 ### Fast Deposits
 
@@ -780,6 +788,41 @@ CONSTRUCTIONS TO CUT
 - Synonym cycling. If "routing" is the right word, use it three times. Rotating to
   "orchestration" is also how a draft accidentally adopts a category we refuse.
 - Hedge pileup. One hedge is honest, three is a model covering itself.
+- Vague declaratives: "the reasons are structural", "the implications are
+  significant", "the underlying problem is more specific". Name the reason.
+- "The number worth sitting with is", "the detail worth carrying forward is".
+  State the number.
+- Telling instead of showing: "this is what X actually looks like", "actually
+  matters", "this is genuinely hard".
+- Dramatic fragments: "That's it. That's the post." "Full stop."
+
+STRUCTURE (stop-slop; counted in code, budgets not bans)
+- ACTIVE VOICE, NAMED ACTORS. No passive. No inanimate thing doing a human verb:
+  "the inventory model becomes a flow model", "the market rewards", "the data
+  tells us". A bank, a treasurer, an issuer, or "you" did something. Say who.
+- "X, not Y" AT MOST ONCE per post, "rather than" included. "In production, not
+  announced", "optional, not structural", "timing rather than inventory" in one
+  post is a tic. State Y on its own.
+- NO Wh- OPENERS on statements. "When settlement rails are live, prefunding..."
+  becomes "Live settlement rails make prefunding optional." Real questions that
+  end in ? are fine.
+- NO LAZY EXTREMES. "every corridor", "never", "nobody", "no individual bank".
+  Use the count or the case.
+- ADVERBS OUT. At most two -ly words in the post, and only when the verb needs
+  them. "Settles directly" can stay. "Incrementally" goes.
+- NO PUNCHY PARAGRAPH ENDINGS as a habit. One paragraph may land on a short
+  line. Two is the metronome. Let a paragraph end mid-thought.
+- NO STACKED FRAGMENTS. Three sentences under six words in a row is drama.
+- VARY SENTENCE LENGTH. Three sentences in a row of the same length is the
+  measured signature of model prose. Put a four-word sentence next to a
+  thirty-word one.
+- TWO ITEMS BEAT THREE. Three parallel examples is the model's default count.
+- PUT THE READER IN THE ROOM. "You" beats "people" and "operators". "You park
+  capital in every corridor you serve" beats "a bank parks capital".
+- NO JARGON: navigate, unpack, lean into, landscape, double down, deep dive,
+  moving forward, circle back, take a step back, on the same page.
+- NO META-COMMENTARY: "hint:", "spoiler:", "feature, not a bug", "dressed up
+  as", "you already know this", "but that's another post", "I promise".
 
 RHYTHM
 Slop has a metronome: every sentence 12 to 18 words, every paragraph three

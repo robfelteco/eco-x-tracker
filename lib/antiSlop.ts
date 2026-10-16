@@ -14,8 +14,12 @@
 //      code and the judgment calls are surfaced to the operator.
 //
 // Compiled 2026-08-28 from github.com/petergyang/no-ai-slop, sloptells.com, and
-// louisabraham.github.io/load-bearing. See ANTI-SLOP.md for provenance, the
-// recorded disagreements between the sources, and the reasoning per rule.
+// louisabraham.github.io/load-bearing. Tier 6 added 2026-10-16 from the
+// stop-slop skill (~/.claude/skills/stop-slop), after Rob read a week of
+// pipeline drafts that cleared every check here and still read as machine
+// prose: the tells had moved from WORDS to STRUCTURE. See ANTI-SLOP.md for
+// provenance, the recorded disagreements between the sources, and the
+// reasoning per rule.
 
 export type SlopSeverity = "hard" | "soft";
 
@@ -54,6 +58,24 @@ const BANNED_PHRASES = [
   "here's the kicker", "no fluff", "thrilled to announce", "excited to announce",
   "humbled to announce", "proud to announce", "we are excited",
   "this is huge", "this changes everything",
+  // stop-slop additions (2026-10-16): throat-clearing, emphasis crutches and
+  // meta-commentary the first three sources did not list.
+  "it turns out", "make no mistake", "full stop.", "this matters because",
+  "can we talk about", "i'm going to be honest", "i'll say it again",
+  "spoiler:", "hint:", "feature, not a bug", "dressed up as",
+  "you already know this", "but that's another post", "i promise",
+  "in a world where", "take a step back", "moving forward", "circle back",
+  "double down", "deep dive", "lean into", "on the same page",
+];
+
+// Business jargon with a plain replacement (stop-slop). SOFT, because two of
+// these are Eco's own words: the one-liner says "navigating onchain markets"
+// and the product posts say "landscape" about chains. Flagged, not vetoed.
+const JARGON: { word: string; plain: string }[] = [
+  { word: "navigate", plain: "handle, route, move through" },
+  { word: "navigating", plain: "handling, routing, moving through" },
+  { word: "unpack", plain: "explain" },
+  { word: "landscape", plain: "market, field, set of chains" },
 ];
 
 // Engagement bait. A report costs -234 and a mute -58.8; nothing on the positive
@@ -113,8 +135,61 @@ const PATTERNS: PatternRule[] = [
     rule: "real-question",
     severity: "hard",
     // sloptells: 29x human baseline, the highest-multiplier construct measured.
-    re: /\bthe\s+(?:real|actual)\s+(?:question|problem|issue|story|answer|reason)\b|\bwhat\s+(?:actually\s+)?matters\s+(?:is|here)\b/gi,
+    // Widened 2026-10-16: the pipeline drafts had moved the same move onto
+    // other nouns ("The actual shift is pre-funding", "the underlying problem
+    // it solves is more specific", "the material question is whether").
+    re: /\bthe\s+(?:real|actual|underlying|material|deeper|bigger|interesting)\s+(?:question|problem|issue|story|answer|reason|shift|change|point|risk|cost|constraint|number|detail|lesson|signal|work)\b|\bwhat\s+(?:actually\s+)?matters\s+(?:is|here)\b/gi,
     fix: "Cut the frame, keep the claim.",
+  },
+  {
+    rule: "worth-frame",
+    severity: "hard",
+    // "The number worth sitting with is", "the detail worth carrying forward
+    // is". A noun, a worthiness clause, then the claim it was delaying.
+    re: /\bthe\s+(?:\w+\s+)?(?:number|detail|part|thing|line|figure|fact|question)\s+worth\s+(?:sitting\s+with|carrying\s+forward|watching|noting|reading|holding\s+onto|remembering)\b/gi,
+    fix: "Delete the frame and state the number or the detail.",
+  },
+  {
+    rule: "binary-contrast",
+    severity: "hard",
+    // The uncontracted form the first rule missed: "It is not X. It is Y.",
+    // "does not reduce the cost. It changes the constraint."
+    re: /\b(?:it|this|that)\s+(?:is|was|does|did)\s+not\s+[^.?!\n]{2,90}\.\s+(?:It|This|That)\s+(?:is|was|does|did|changes|means|becomes)\b/g,
+    fix: "State the second sentence on its own. Drop the negated setup.",
+  },
+  {
+    rule: "vague-declarative",
+    severity: "hard",
+    // stop-slop: announcing importance without naming the thing.
+    re: /\bthe\s+(?:reasons?|implications?|stakes|consequences?|problem|answer|shift|change|difference|point)\s+(?:is|are)\s+(?:structural|significant|real|high|deeper|bigger|simple|clear|elsewhere|obvious|more\s+(?:specific|interesting|subtle))\b/gi,
+    fix: "Name the specific reason, implication or difference. Or cut the sentence.",
+  },
+  {
+    rule: "telling",
+    severity: "hard",
+    re: /\bthis\s+is\s+what\s+\w+(?:\s+\w+)?\s+actually\s+looks\s+like\b|\bactually\s+matters\b|\bthis\s+is\s+(?:genuinely\s+)?hard\b/gi,
+    fix: "Show the thing instead of announcing that it matters or that it is hard.",
+  },
+  {
+    rule: "fragment-drama",
+    severity: "hard",
+    re: /\bthat'?s\s+it\.|\bthat'?s\s+the\s+(?:whole\s+)?(?:point|thing|game|story|job|post)\b|\bfull\s+stop\b|(?:^|\s)period\.\s*(?:\n|$)/gi,
+    fix: "Performative simplicity. Write the sentence the fragment is standing in for.",
+  },
+  {
+    rule: "false-agency",
+    severity: "soft",
+    // stop-slop: inanimate things doing human verbs. "The inventory model
+    // becomes a flow model." "The market rewards." Someone did something;
+    // name them, or put the reader in the seat with "you".
+    re: /\b(?:the\s+)?(?:\w+\s+)?(?:model|market|markets|data|decision|culture|conversation|constraint|question|number|cost|story|headline|narrative|industry|bottleneck|moment|rail|rails|ledger|system)\s+(?:becomes?|became|emerges?|rewards?|tells\s+us|shifts?|moves\s+toward|lives\s+or\s+dies|wants?|demands?|decides?|knows?|remembers?|forgives?|punishes)\b/gi,
+    fix: "An inanimate subject doing a human verb. Name who acts, or make it 'you'.",
+  },
+  {
+    rule: "so-opener",
+    severity: "soft",
+    re: /(?:^|\n\n)So,?\s+[a-z]/g,
+    fix: "Start the paragraph with content, not 'So'.",
   },
   {
     rule: "faux-insight",
@@ -439,6 +514,11 @@ export function scanSlop(text: string): SlopFinding[] {
     if (m) push(out, { rule: "engagement-bait", severity: "hard", match: m[0], fix: "Earn the reply with a claim worth arguing with. Never ask for it." });
   }
 
+  for (const j of JARGON) {
+    const m = text.match(wordRe(j.word));
+    if (m) push(out, { rule: "jargon", severity: "soft", match: m[0], fix: `Business jargon. Plainer: ${j.plain}.` });
+  }
+
   // --- Tier 2 register budget ---
   const registerHits: string[] = [];
   for (const w of REGISTER_WORDS) {
@@ -461,6 +541,9 @@ export function scanSlop(text: string): SlopFinding[] {
     if (p.rule === "hedge-pileup" && hits.length <= HEDGE_BUDGET) continue;
     push(out, { rule: p.rule, severity: p.severity, match: (hits[0] ?? "").trim().slice(0, 60), fix: p.fix });
   }
+
+  // --- Tier 6 structure (stop-slop) ---
+  for (const f of structureFindings(text)) push(out, f);
 
   // --- Tier 5 commodity zone ---
   for (const w of COMMODITY_PHRASES) {
@@ -498,8 +581,178 @@ export function scanSlop(text: string): SlopFinding[] {
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "hard" ? -1 : 1));
 }
 
+// ---------------------------------------------------------------------------
+// Tier 6, structure. From the stop-slop skill, 2026-10-16.
+//
+// These are the tells that survive a word list. A week of pipeline drafts had
+// no banned words, one register word apiece, no em dashes, and still read as
+// one voice: "X, not Y" closing four sentences in a post, every paragraph
+// landing on a four-word line, three sentences in a row of fifteen words, the
+// subject of every sentence a noun doing a verb ("the model becomes a flow
+// model"). None of that is a phrase. It is counted, not matched.
+//
+// Budgets, not bans, because each of these is fine ONCE. Twice is the pattern.
+// ---------------------------------------------------------------------------
+
+const TRAILING_CONTRAST_BUDGET = 1; // "X, not Y." / "X rather than Y"
+const WH_OPENER_BUDGET = 1; // statements starting What/When/Where/Which/Who/Why/How
+const EXTREME_BUDGET = 1; // every / always / never / everyone / nobody
+const ADVERB_BUDGET = 2; // -ly words
+const PUNCHY_ENDING_BUDGET = 1; // paragraphs ending on a line of six words or fewer
+
+// -ly words that are not adverbs, or are adverbs nobody reads as emphasis.
+const LY_ALLOW = new Set([
+  "only", "early", "daily", "weekly", "monthly", "quarterly", "yearly", "hourly", "family",
+  "supply", "apply", "reply", "rally", "ally", "italy", "july", "assembly", "anomaly",
+  "holy", "ugly", "friendly", "costly", "deadly", "lonely", "timely", "lively", "likely",
+  "unlikely", "orderly", "fly", "rely", "multiply", "comply", "imply", "belly", "jelly",
+  "bully", "tally", "silly", "chilly", "hilly", "jolly", "folly", "dolly", "fully",
+]);
+
+function words(s: string): string[] {
+  return s.match(/[A-Za-z$][\w$%.,-]*/g) ?? [];
+}
+
+function structureFindings(text: string): SlopFinding[] {
+  const out: SlopFinding[] = [];
+  // Paragraphs and sentences, with URLs and bullet lines dropped: a bare link
+  // on its own line is not a punchy ending, a URL is not a word, and the items
+  // of a real list are not three stacked sentences.
+  const body = text
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/(?:^|\n)\s*[-•*↳]\s+[^\n]*/g, "\n")
+    .trim();
+  const paragraphs = body.split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  const sentences = sentencesOf(body);
+
+  // "X, not Y." and "rather than". The mechanical contrast the first three
+  // sources only listed in its "it's not X, it's Y" form.
+  const trailing = body.match(/,\s+not\s+(?:a|an|the|just|only|merely)?\s*[\w$%-]+(?:\s+[\w$%-]+){0,4}(?=[.;!?\n]|$)/g) ?? [];
+  const rather = body.match(/\brather\s+than\b/gi) ?? [];
+  const contrasts = trailing.length + rather.length;
+  if (contrasts > TRAILING_CONTRAST_BUDGET) {
+    out.push({
+      rule: "trailing-contrast",
+      severity: "hard",
+      match: (trailing[0] ?? rather[0] ?? "").trim().slice(0, 60),
+      fix: `${contrasts} "X, not Y" / "rather than" contrasts (budget ${TRAILING_CONTRAST_BUDGET}). State Y on its own in all but one.`,
+    });
+  }
+
+  // Wh- openers on statements. Questions are allowed: a real question is one
+  // of the few things on this platform that earns a reply.
+  const wh = sentences.filter((x) => /^(?:What|When|Where|Which|Who|Why|How)\b/.test(x) && !/\?\s*$/.test(x));
+  if (wh.length > WH_OPENER_BUDGET) {
+    out.push({
+      rule: "wh-opener",
+      severity: "soft",
+      match: wh[0].slice(0, 60),
+      fix: `${wh.length} statements open on a Wh- word. Lead with the subject: "The constraint is", not "What makes this hard is".`,
+    });
+  }
+
+  // Lazy extremes. "every corridor", "no individual bank", "never".
+  const extremes = body.match(/\b(?:every|always|never|everyone|everybody|nobody|no\s+one|all\s+of\s+them)\b/gi) ?? [];
+  if (extremes.length > EXTREME_BUDGET) {
+    out.push({
+      rule: "lazy-extremes",
+      severity: "soft",
+      match: extremes.join(", ").slice(0, 60),
+      fix: `${extremes.length} sweeping words (budget ${EXTREME_BUDGET}). Replace with the specific count or case.`,
+    });
+  }
+
+  // Adverbs. The skill kills all of them; the budget here is two, because
+  // "directly" in "settles directly into the account" is doing work.
+  const ly = words(body)
+    .map((w) => w.toLowerCase().replace(/[^a-z]/g, ""))
+    .filter((w) => w.length > 4 && w.endsWith("ly") && !LY_ALLOW.has(w));
+  const lyUnique = [...new Set(ly)];
+  if (ly.length > ADVERB_BUDGET) {
+    out.push({
+      rule: "adverb-pileup",
+      severity: "soft",
+      match: lyUnique.slice(0, 5).join(", "),
+      fix: `${ly.length} adverbs (budget ${ADVERB_BUDGET}). Cut them; if the verb needs help, pick a better verb.`,
+    });
+  }
+
+  // Punchy endings: a paragraph of two or more sentences that lands on a line
+  // of six words or fewer. Once is a beat. Twice is the metronome.
+  const punchy = paragraphs.filter((p) => {
+    const ss = sentencesOf(p);
+    return ss.length >= 2 && words(ss[ss.length - 1]).length <= 6;
+  });
+  if (punchy.length > PUNCHY_ENDING_BUDGET) {
+    const last = sentencesOf(punchy[0]);
+    out.push({
+      rule: "punchy-endings",
+      severity: "soft",
+      match: last[last.length - 1].slice(0, 60),
+      fix: `${punchy.length} paragraphs end on a short punchy line. Vary the endings; let one paragraph end mid-thought.`,
+    });
+  }
+
+  // Staccato: three consecutive sentences of six words or fewer. SOFT, against
+  // the skill's instinct: the pillar's third-best post ever ("Not one chain.
+  // Eight. Not one stablecoin. Six.", 3.3k impressions) is exactly this shape,
+  // done on purpose by a person. Surfaced so the operator sees it; not a veto.
+  const lens = sentences.map((x) => words(x).length);
+  for (let i = 0; i + 2 < lens.length; i++) {
+    if (lens[i] <= 6 && lens[i + 1] <= 6 && lens[i + 2] <= 6) {
+      out.push({
+        rule: "staccato",
+        severity: "soft",
+        match: sentences.slice(i, i + 3).join(" ").slice(0, 60),
+        fix: "Three short sentences stacked for drama. Join two of them.",
+      });
+      break;
+    }
+  }
+
+  // Metronome: three consecutive sentences within three words of each other,
+  // all in the 10-24 band. The measured signature of model prose.
+  for (let i = 0; i + 2 < lens.length; i++) {
+    const run = lens.slice(i, i + 3);
+    if (run.every((n) => n >= 10 && n <= 24) && Math.max(...run) - Math.min(...run) <= 3) {
+      out.push({
+        rule: "metronome",
+        severity: "soft",
+        match: `${run.join("/")} words`,
+        fix: "Three sentences of the same length in a row. Make one four words long or thirty.",
+      });
+      break;
+    }
+  }
+
+  return out;
+}
+
 export function hardFindings(f: SlopFinding[]): SlopFinding[] {
   return f.filter((x) => x.severity === "hard");
+}
+
+// ---------------------------------------------------------------------------
+// When to spend a repair round-trip, and whether a repair was worth keeping.
+//
+// Until 2026-10-16 only a HARD finding triggered the repair. That let a draft
+// through with five soft structural findings, which is exactly the draft Rob
+// described as "consistently falling into patterns of ai slop phrasing and
+// structure": nothing on it was individually wrong, and together it was a
+// voice. So a pile of soft findings now earns the repair pass too.
+// ---------------------------------------------------------------------------
+export const SOFT_REPAIR_THRESHOLD = 3;
+
+export function needsRepair(f: SlopFinding[]): boolean {
+  return hardFindings(f).length > 0 || f.length >= SOFT_REPAIR_THRESHOLD;
+}
+
+/** True when `after` is a strict improvement on `before`: fewer hard findings, or the same hard count and fewer in total. */
+export function repairImproved(before: SlopFinding[], after: SlopFinding[]): boolean {
+  const hb = hardFindings(before).length;
+  const ha = hardFindings(after).length;
+  if (ha < hb) return true;
+  return ha === hb && after.length < before.length;
 }
 
 /** Compact, one line per finding, for a repair prompt. */
@@ -650,6 +903,41 @@ CONSTRUCTIONS TO CUT
 - Synonym cycling. If "routing" is the right word, use it three times. Rotating to
   "orchestration" is also how a draft accidentally adopts a category we refuse.
 - Hedge pileup. One hedge is honest, three is a model covering itself.
+- Vague declaratives: "the reasons are structural", "the implications are
+  significant", "the underlying problem is more specific". Name the reason.
+- "The number worth sitting with is", "the detail worth carrying forward is".
+  State the number.
+- Telling instead of showing: "this is what X actually looks like", "actually
+  matters", "this is genuinely hard".
+- Dramatic fragments: "That's it. That's the post." "Full stop."
+
+STRUCTURE (stop-slop; counted in code, budgets not bans)
+- ACTIVE VOICE, NAMED ACTORS. No passive. No inanimate thing doing a human verb:
+  "the inventory model becomes a flow model", "the market rewards", "the data
+  tells us". A bank, a treasurer, an issuer, or "you" did something. Say who.
+- "X, not Y" AT MOST ONCE per post, "rather than" included. "In production, not
+  announced", "optional, not structural", "timing rather than inventory" in one
+  post is a tic. State Y on its own.
+- NO Wh- OPENERS on statements. "When settlement rails are live, prefunding..."
+  becomes "Live settlement rails make prefunding optional." Real questions that
+  end in ? are fine.
+- NO LAZY EXTREMES. "every corridor", "never", "nobody", "no individual bank".
+  Use the count or the case.
+- ADVERBS OUT. At most two -ly words in the post, and only when the verb needs
+  them. "Settles directly" can stay. "Incrementally" goes.
+- NO PUNCHY PARAGRAPH ENDINGS as a habit. One paragraph may land on a short
+  line. Two is the metronome. Let a paragraph end mid-thought.
+- NO STACKED FRAGMENTS. Three sentences under six words in a row is drama.
+- VARY SENTENCE LENGTH. Three sentences in a row of the same length is the
+  measured signature of model prose. Put a four-word sentence next to a
+  thirty-word one.
+- TWO ITEMS BEAT THREE. Three parallel examples is the model's default count.
+- PUT THE READER IN THE ROOM. "You" beats "people" and "operators". "You park
+  capital in every corridor you serve" beats "a bank parks capital".
+- NO JARGON: navigate, unpack, lean into, landscape, double down, deep dive,
+  moving forward, circle back, take a step back, on the same page.
+- NO META-COMMENTARY: "hint:", "spoiler:", "feature, not a bug", "dressed up
+  as", "you already know this", "but that's another post", "I promise".
 
 RHYTHM
 Slop has a metronome: every sentence 12 to 18 words, every paragraph three
