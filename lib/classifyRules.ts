@@ -105,8 +105,12 @@ export function classifyByRules(input: RuleInput): RuleResult {
   // R2 — a STANDALONE post (not a reply) that links out to an external, non-Eco
   // domain AND never mentions Eco/product → broad_educational. Replies are
   // excluded: they're usually source-drops/CTAs on Eco's own threads, not
-  // standalone market content, so we leave them for Stage 2.
-  if (external.length > 0 && !eco && !input.is_reply) {
+  // standalone market content, so we leave them for Stage 2. Video/GIF posts
+  // are excluded too: a data motion visual cites its source link (ousd.fyi,
+  // Dune, Artemis) and often never names Eco, so the link says nothing about
+  // the pillar — the media does, and only Stage 2 looks at it.
+  const motion = input.media_type === "video" || input.media_type === "animated_gif";
+  if (external.length > 0 && !eco && !input.is_reply && !motion) {
     return {
       template: "broad_educational",
       confidence: 0.9,
